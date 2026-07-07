@@ -7,6 +7,26 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://tubura_user:yourpassword@localhost:5432/tubura_db"
 
+    @property
+    def SQLALCHEMY_DATABASE_URL(self) -> str:
+        """
+        Normalizes DATABASE_URL to always use the psycopg3 driver
+        (postgresql+psycopg://) regardless of what scheme the hosting
+        provider gives us. Some providers (Railway, Heroku, etc.) hand out
+        `postgres://` or plain `postgresql://`, both of which SQLAlchemy
+        would otherwise resolve to the psycopg2 driver — and psycopg2-binary
+        depends on a system-installed libpq that many minimal container
+        images (including Railway's) don't ship, causing an ImportError at
+        startup. psycopg[binary] bundles its own libpq, so switching the
+        dialect prefix avoids that class of deployment failure entirely.
+        """
+        url = self.DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
+
     # Security
     SECRET_KEY: str = "change-this-to-a-long-random-string-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
