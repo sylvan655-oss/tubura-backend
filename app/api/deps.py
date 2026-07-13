@@ -51,3 +51,14 @@ def require_superadmin(admin: Administrator = Depends(get_current_admin)) -> Adm
     if admin.role != "superadmin":
         raise HTTPException(403, "Superadmin only")
     return admin
+
+
+def require_perm(perm: str):
+    """Route guard: superadmins pass; regular admins need `perm` in their list."""
+    def dep(admin: Administrator = Depends(get_current_admin)) -> Administrator:
+        if admin.role == "superadmin":
+            return admin
+        if perm not in (admin.permissions or []):
+            raise HTTPException(403, f"You don't have the '{perm}' permission")
+        return admin
+    return dep

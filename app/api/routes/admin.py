@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_admin, require_superadmin
+from app.api.deps import get_current_admin, require_superadmin, require_perm
 from app.core.security import verify_password, hash_password, create_token
 from app.db.session import get_db
 from app.models import (Administrator, Category, Product, Retailer,
@@ -77,7 +77,7 @@ class CategoryIn(BaseModel):
 
 
 @router.get("/categories")
-def admin_categories(admin=Depends(get_current_admin),
+def admin_categories(admin=Depends(require_perm('categories')),
                      db: Session = Depends(get_db)):
     cats = db.query(Category).order_by(Category.sort_order, Category.id).all()
     return [{"id": c.id, "name_en": c.name_en, "name_rw": c.name_rw,
@@ -86,7 +86,7 @@ def admin_categories(admin=Depends(get_current_admin),
 
 
 @router.post("/categories")
-def add_category(body: CategoryIn, admin=Depends(get_current_admin),
+def add_category(body: CategoryIn, admin=Depends(require_perm('categories')),
                  db: Session = Depends(get_db)):
     c = Category(**body.model_dump())
     db.add(c); db.commit(); db.refresh(c)
@@ -95,7 +95,7 @@ def add_category(body: CategoryIn, admin=Depends(get_current_admin),
 
 @router.put("/categories/{cat_id}")
 def edit_category(cat_id: int, body: CategoryIn,
-                  admin=Depends(get_current_admin),
+                  admin=Depends(require_perm('categories')),
                   db: Session = Depends(get_db)):
     c = db.get(Category, cat_id)
     if not c:
@@ -107,7 +107,7 @@ def edit_category(cat_id: int, body: CategoryIn,
 
 
 @router.delete("/categories/{cat_id}")
-def delete_category(cat_id: int, admin=Depends(get_current_admin),
+def delete_category(cat_id: int, admin=Depends(require_perm('categories')),
                     db: Session = Depends(get_db)):
     c = db.get(Category, cat_id)
     if not c:
@@ -137,7 +137,7 @@ class ProductIn(BaseModel):
 
 
 @router.get("/products")
-def admin_products(admin=Depends(get_current_admin),
+def admin_products(admin=Depends(require_perm('products')),
                    db: Session = Depends(get_db),
                    category_id: int | None = None,
                    status: str | None = None,
@@ -185,7 +185,7 @@ def admin_products(admin=Depends(get_current_admin),
 
 
 @router.post("/products")
-def add_product(body: ProductIn, admin=Depends(get_current_admin),
+def add_product(body: ProductIn, admin=Depends(require_perm('products')),
                 db: Session = Depends(get_db)):
     p = Product(**body.model_dump())
     db.add(p); db.commit(); db.refresh(p)
@@ -194,7 +194,7 @@ def add_product(body: ProductIn, admin=Depends(get_current_admin),
 
 @router.put("/products/{product_id}")
 def edit_product(product_id: int, body: ProductIn,
-                 admin=Depends(get_current_admin),
+                 admin=Depends(require_perm('products')),
                  db: Session = Depends(get_db)):
     p = db.get(Product, product_id)
     if not p:
@@ -206,7 +206,7 @@ def edit_product(product_id: int, body: ProductIn,
 
 
 @router.delete("/products/{product_id}")
-def delete_product(product_id: int, admin=Depends(get_current_admin),
+def delete_product(product_id: int, admin=Depends(require_perm('products')),
                    db: Session = Depends(get_db)):
     p = db.get(Product, product_id)
     if not p:
@@ -239,7 +239,7 @@ class RetailerIn(BaseModel):
 
 
 @router.get("/retailers")
-def admin_retailers(admin=Depends(get_current_admin),
+def admin_retailers(admin=Depends(require_perm('retailers')),
                     db: Session = Depends(get_db)):
     rows = db.query(Retailer).order_by(Retailer.id).all()
     return [{"id": r.id, "name": r.name, "phone": r.phone,
@@ -250,7 +250,7 @@ def admin_retailers(admin=Depends(get_current_admin),
 
 
 @router.post("/retailers")
-def add_retailer(body: RetailerIn, admin=Depends(get_current_admin),
+def add_retailer(body: RetailerIn, admin=Depends(require_perm('retailers')),
                  db: Session = Depends(get_db)):
     r = Retailer(**body.model_dump())
     db.add(r); db.commit(); db.refresh(r)
@@ -259,7 +259,7 @@ def add_retailer(body: RetailerIn, admin=Depends(get_current_admin),
 
 @router.put("/retailers/{retailer_id}")
 def edit_retailer(retailer_id: int, body: RetailerIn,
-                  admin=Depends(get_current_admin),
+                  admin=Depends(require_perm('retailers')),
                   db: Session = Depends(get_db)):
     r = db.get(Retailer, retailer_id)
     if not r:
@@ -279,7 +279,7 @@ class StockIn(BaseModel):
 
 
 @router.get("/stock")
-def admin_stock(admin=Depends(get_current_admin),
+def admin_stock(admin=Depends(require_perm('stock')),
                 db: Session = Depends(get_db),
                 retailer_id: int | None = None,
                 product_id: int | None = None):
@@ -297,7 +297,7 @@ def admin_stock(admin=Depends(get_current_admin),
 
 
 @router.put("/stock")
-def set_stock(body: StockIn, admin=Depends(get_current_admin),
+def set_stock(body: StockIn, admin=Depends(require_perm('stock')),
               db: Session = Depends(get_db)):
     """Upsert: creates the row if this retailer never stocked this product."""
     if body.quantity < 0:
@@ -333,7 +333,7 @@ STATUS_MESSAGES = {
 
 
 @router.get("/orders")
-def admin_orders(admin=Depends(get_current_admin),
+def admin_orders(admin=Depends(require_perm('orders')),
                  db: Session = Depends(get_db),
                  status: str | None = None,
                  search: str | None = None):
@@ -368,7 +368,7 @@ class StatusIn(BaseModel):
 
 @router.put("/orders/{order_id}/status")
 def set_order_status(order_id: int, body: StatusIn,
-                     admin=Depends(get_current_admin),
+                     admin=Depends(require_perm('orders')),
                      db: Session = Depends(get_db)):
     if body.status not in ORDER_STATUSES:
         raise HTTPException(400, f"Status must be one of {ORDER_STATUSES}")
@@ -406,7 +406,7 @@ class ReassignIn(BaseModel):
 
 @router.put("/order-items/{item_id}/retailer")
 def reassign_item(item_id: int, body: ReassignIn,
-                  admin=Depends(get_current_admin),
+                  admin=Depends(require_perm('orders')),
                   db: Session = Depends(get_db)):
     item = db.get(OrderItem, item_id)
     if not item:
@@ -436,7 +436,7 @@ PREORDER_STATUSES = ["received", "under_review", "approved", "ordered",
 
 
 @router.get("/preorders")
-def admin_preorders(admin=Depends(get_current_admin),
+def admin_preorders(admin=Depends(require_perm('preorders')),
                     db: Session = Depends(get_db),
                     status: str | None = None):
     q = db.query(PreOrder)
@@ -456,7 +456,7 @@ def admin_preorders(admin=Depends(get_current_admin),
 
 @router.put("/preorders/{po_id}/status")
 def set_preorder_status(po_id: int, body: StatusIn,
-                        admin=Depends(get_current_admin),
+                        admin=Depends(require_perm('preorders')),
                         db: Session = Depends(get_db)):
     if body.status not in PREORDER_STATUSES:
         raise HTTPException(400, f"Status must be one of {PREORDER_STATUSES}")
@@ -478,7 +478,7 @@ def set_preorder_status(po_id: int, body: StatusIn,
 # ── CUSTOMERS ──────────────────────────────────────────────────────────────
 
 @router.get("/customers")
-def admin_customers(admin=Depends(get_current_admin),
+def admin_customers(admin=Depends(require_perm('customers')),
                     db: Session = Depends(get_db),
                     search: str | None = None,
                     care_status: str | None = None):
@@ -509,7 +509,7 @@ class CustomerUpdate(BaseModel):
 
 @router.put("/customers/{user_id}")
 def update_customer(user_id: int, body: CustomerUpdate,
-                    admin=Depends(get_current_admin),
+                    admin=Depends(require_perm('customers')),
                     db: Session = Depends(get_db)):
     u = db.get(User, user_id)
     if not u:
@@ -536,7 +536,7 @@ class CampaignIn(BaseModel):
 
 
 @router.post("/notifications")
-def create_campaign(body: CampaignIn, admin=Depends(get_current_admin),
+def create_campaign(body: CampaignIn, admin=Depends(require_perm('notifications')),
                     db: Session = Depends(get_db)):
     if body.audience == "all":
         n = Notification(**body.model_dump(), user_id=None,
@@ -558,7 +558,7 @@ def create_campaign(body: CampaignIn, admin=Depends(get_current_admin),
 
 
 @router.get("/notifications")
-def admin_notifications(admin=Depends(get_current_admin),
+def admin_notifications(admin=Depends(require_perm('notifications')),
                         db: Session = Depends(get_db)):
     rows = (db.query(Notification)
               .filter(Notification.created_by_admin_id.isnot(None))
@@ -570,7 +570,7 @@ def admin_notifications(admin=Depends(get_current_admin),
 
 
 @router.delete("/notifications/{notif_id}")
-def delete_notification(notif_id: int, admin=Depends(get_current_admin),
+def delete_notification(notif_id: int, admin=Depends(require_perm('notifications')),
                         db: Session = Depends(get_db)):
     n = db.get(Notification, notif_id)
     if n:
@@ -584,7 +584,7 @@ TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"]
 
 
 @router.get("/tickets")
-def admin_tickets(admin=Depends(get_current_admin),
+def admin_tickets(admin=Depends(require_perm('support')),
                   db: Session = Depends(get_db),
                   status: str | None = None):
     q = db.query(SupportTicket)
@@ -606,7 +606,7 @@ class TicketUpdate(BaseModel):
 
 @router.put("/tickets/{ticket_id}")
 def update_ticket(ticket_id: int, body: TicketUpdate,
-                  admin=Depends(get_current_admin),
+                  admin=Depends(require_perm('support')),
                   db: Session = Depends(get_db)):
     t = db.get(SupportTicket, ticket_id)
     if not t:
