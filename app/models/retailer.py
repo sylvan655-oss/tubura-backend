@@ -1,31 +1,35 @@
-from sqlalchemy import Integer, String, Float
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
+from sqlalchemy import Column, Integer, String, Float, Boolean
+from sqlalchemy.orm import relationship
 from app.db.session import Base
 
 
 class Retailer(Base):
+    """
+    A fixed Tubura fulfillment point. Customers never browse retailers —
+    the system assigns the nearest stocked retailer to each order item
+    after the delivery address is confirmed.
+
+    "Nearest" is decided by administrative closeness to the delivery
+    address: same village > same cell > same sector > same district >
+    same province. latitude/longitude are optional extras (useful for
+    couriers and future true-distance ranking).
+    """
     __tablename__ = "retailers"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(150), nullable=False)
-    phone: Mapped[str] = mapped_column(String(20), nullable=True)
-    district: Mapped[str] = mapped_column(String(60), nullable=True)
+    id = Column(Integer, primary_key=True)
+    name = Column(String(150), nullable=False)
+    phone = Column(String(20), nullable=True)
 
-    latitude: Mapped[float] = mapped_column(Float, nullable=True)
-    longitude: Mapped[float] = mapped_column(Float, nullable=True)
+    province = Column(String(60), nullable=True)
+    district = Column(String(60), nullable=True)
+    sector = Column(String(60), nullable=True)
+    cell = Column(String(60), nullable=True)
+    village = Column(String(60), nullable=True)
 
-    stock_level: Mapped[str] = mapped_column(String(20), default="Medium")  # High | Medium | Low
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
 
-    orders = relationship("Order", back_populates="retailer")
+    is_active = Column(Boolean, nullable=False, default=True)
 
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "phone": self.phone,
-            "district": self.district,
-            "latitude": self.latitude,
-            "longitude": self.longitude,
-            "stock": self.stock_level,
-        }
+    stocks = relationship("RetailerStock", back_populates="retailer",
+                          cascade="all, delete-orphan")

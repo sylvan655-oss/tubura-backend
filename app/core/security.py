@@ -1,7 +1,5 @@
 import random
-import string
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timedelta
 
 from jose import jwt, JWTError
 from passlib.context import CryptContext
@@ -9,41 +7,34 @@ from passlib.context import CryptContext
 from app.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ALGORITHM = "HS256"
 
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    if not hashed:
-        return False
     try:
         return pwd_context.verify(plain, hashed)
     except Exception:
         return False
 
 
-def generate_otp() -> str:
-    return "".join(random.choices(string.digits, k=settings.OTP_LENGTH))
+def create_token(subject: str, role: str) -> str:
+    """role is 'user' or 'admin'; subject is user id / admin id."""
+    expire = datetime.utcnow() + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": str(subject), "role": role, "exp": expire}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
-def generate_farmer_id(district_code: str = "OAF") -> str:
-    num = "".join(random.choices(string.digits, k=5))
-    return f"{district_code.upper()[:3]}-{num}"
-
-
-def create_access_token(subject: str, expires_minutes: Optional[int] = None) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=expires_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-    to_encode = {"sub": subject, "exp": expire}
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
-
-def decode_access_token(token: str) -> Optional[str]:
+def decode_token(token: str) -> dict | None:
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        return payload.get("sub")
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         return None
+
+
+def generate_otp() -> str:
+    return f"{random.randint(0, 999999):06d}"

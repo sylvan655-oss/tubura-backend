@@ -1,179 +1,241 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+import random
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.utils import normalize_phone
+from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.farmer import Farmer
-from app.models.notification import Notification
-from app.models.order import Order, OrderItem
-from app.models.retailer import Retailer
-from app.schemas.order import OrderCreate
-from app.services.payment import request_payment
-from app.services.sms import send_order_update_sms
-from app.api.deps import get_optional_farmer
+from app.models import (User, Product, Order, OrderItem, PreOrder,
+                        Notification)
+from app.services.assignment import allocate
+from app.services.sms import send_sms
+from app.api.routes.catalog import stock_totals
 
-router = APIRouter(prefix="/api/orders", tags=["orders"])
-
-DELIVERY_FEES = {"standard": 1500, "express": 3000}
+router = APIRouter(prefix="/api", tags=["orders"])
 
 
-@router.post("")
-async def create_order(payload: OrderCreate, db: Session = Depends(get_db)):
-    farmer = None
-    if payload.user_phone:
-        phone = normalize_phone(payload.user_phone)
-        farmer = db.query(Farmer).filter(Farmer.phone == phone).first()
+def new_ref(db: Session) -> str:
+    while True:
+        ref = "TUB" + "".join(random.choices("0123456789", k=6))
+        if not db.query(Order).filter(Order.ref == ref).first():
+            return ref
 
-    retailer = None
-    if payload.retailer_id:
-        retailer = db.query(Retailer).filter(Retailer.id == payload.retailer_id).first()
 
-    subtotal = sum(item.price * item.qty for item in payload.items)
-    fee = 0 if payload.delivery_method == "pickup" else DELIVERY_FEES.get(payload.speed or "standard", 1500)
-    total = subtotal + fee
+class ItemIn(BaseModel):
+    product_id: int
+    qty: int                 # buy now (must be available)
+    preorder_qty: int = 0    # EXPLICITLY approved by the customer
 
-    order = Order(
-        farmer_id=farmer.id if farmer else None,
-        retailer_id=retailer.id if retailer else None,
-        delivery_method=payload.delivery_method,
-        speed=payload.speed,
-        payment_method=payload.payment_method,
-        subtotal=subtotal,
-        delivery_fee=fee,
-        total=total,
-        status="confirmed",
-        payment_status="pending",
-    )
+
+class AddressIn(BaseModel):
+    use_default: bool = True
+    save_as_default: bool = False
+    province: str | None = None
+    district: str | None = None
+    sector: str | None = None
+    cell: str | None = None
+    village: str | None = None
+    street: str | None = None
+    landmark: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class OrderIn(BaseModel):
+    items: list[ItemIn]
+    address: AddressIn
+
+
+def order_json(o: Order) -> dict:
+    return {
+        "id": o.id, "ref": o.ref, "status": o.status,
+        "subtotal": o.subtotal, "delivery_fee": o.delivery_fee,
+        "total": o.total,
+        "address": {"province": o.province, "district": o.district,
+                    "sector": o.sector, "cell": o.cell,
+                    "village": o.village, "street": o.street,
+                    "landmark": o.landmark},
+        "created_at": o.created_at.isoformat(),
+        "items": [{
+            "id": i.id, "product_id": i.product_id, "name": i.name,
+            "unit": i.unit, "price": i.price, "qty": i.qty, "img": i.img,
+            "retailer": i.retailer.name if i.retailer else None,
+            "retailer_district": i.retailer.district if i.retailer else None,
+        } for i in o.items],
+    }
+
+
+@router.post("/orders")
+def create_order(body: OrderIn, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    if not body.items:
+        raise HTTPException(400, "Cart is empty")
+
+    # ── Resolve the delivery address ──────────────────────────────────────
+    a = body.address
+    if a.use_default:
+        addr = dict(province=user.province, district=user.district,
+                    sector=user.sector, cell=user.cell, village=user.village,
+                    street=a.street or user.street,
+                    landmark=a.landmark or user.landmark,
+                    latitude=a.latitude, longitude=a.longitude)
+    else:
+        if not (a.province and a.district and a.sector):
+            raise HTTPException(400, "Delivery address is incomplete")
+        addr = dict(province=a.province, district=a.district,
+                    sector=a.sector, cell=a.cell, village=a.village,
+                    street=a.street, landmark=a.landmark,
+                    latitude=a.latitude, longitude=a.longitude)
+        if a.save_as_default:
+            for f in ("province", "district", "sector", "cell", "village",
+                      "street", "landmark"):
+                setattr(user, f, addr[f])
+
+    # ── PASS 1: validate availability. NEVER decide for the customer. ─────
+    # If any "buy now" quantity exceeds current stock, refuse the whole
+    # order and report exactly what IS available, so the frontend can ask
+    # the customer whether they want to pre-order the remainder.
+    products: dict[int, Product] = {}
+    shortages = []
+    for item in body.items:
+        if item.qty < 0 or item.preorder_qty < 0:
+            raise HTTPException(400, "Quantities cannot be negative")
+        if item.qty == 0 and item.preorder_qty == 0:
+            continue
+        product = db.get(Product, item.product_id)
+        if not product or product.status != "active":
+            raise HTTPException(400, f"Product {item.product_id} unavailable")
+        products[item.product_id] = product
+        available = stock_totals(db, [product.id]).get(product.id, 0)
+        if item.qty > available:
+            shortages.append({"product_id": product.id,
+                              "product": product.name_en,
+                              "requested": item.qty,
+                              "available": available})
+    if shortages:
+        # 409 Conflict: nothing was created; customer must decide.
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "insufficient_stock", "items": shortages})
+
+    # ── PASS 2: create the order + customer-approved pre-orders ───────────
+    order = Order(ref=new_ref(db), user_id=user.id, status="pending", **addr)
     db.add(order)
-    db.flush()  # get order.id before adding items
+    db.flush()
 
-    for item in payload.items:
-        db.add(
-            OrderItem(
-                order_id=order.id,
-                product_id=item.id,
-                name=item.name,
-                price=item.price,
-                unit=item.unit,
-                img=item.img,
-                qty=item.qty,
-            )
-        )
+    subtotal = 0.0
+    preorders_created = []
 
-    if farmer:
-        db.add(
-            Notification(
-                farmer_id=farmer.id,
-                category="order",
-                title="Order confirmed",
-                body=f"Order #{order.ref} has been placed — {int(total):,} RWF".replace(",", ","),
-                order_id=order.ref,
-            )
-        )
+    for item in body.items:
+        product = products.get(item.product_id)
+        if not product:
+            continue
 
+        if item.qty > 0:
+            allocation, shortfall = allocate(db, product.id, item.qty, addr)
+            if shortfall > 0:
+                # stock changed between pass 1 and now (very rare race)
+                db.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": "insufficient_stock",
+                            "items": [{"product_id": product.id,
+                                       "product": product.name_en,
+                                       "requested": item.qty,
+                                       "available": item.qty - shortfall}]})
+            for stock_row, take in allocation:
+                db.add(OrderItem(order_id=order.id, product_id=product.id,
+                                 retailer_id=stock_row.retailer_id,
+                                 name=product.name_en, unit=product.unit_en,
+                                 price=product.price, qty=take,
+                                 img=product.img))
+                stock_row.quantity -= take        # decrement stock now
+                subtotal += product.price * take
+
+        if item.preorder_qty > 0:
+            # Only because the customer explicitly chose it.
+            totals = stock_totals(db, [product.id])
+            db.add(PreOrder(user_id=user.id, product_id=product.id,
+                            product_name=product.name_en,
+                            requested_qty=item.preorder_qty,
+                            stock_at_request=totals.get(product.id, 0),
+                            status="received"))
+            preorders_created.append({"product": product.name_en,
+                                      "qty": item.preorder_qty})
+
+    if subtotal == 0 and not preorders_created:
+        raise HTTPException(400, "Nothing could be ordered")
+
+    if subtotal == 0:
+        # Pre-orders only, no purchasable items: don't keep an empty order
+        db.delete(order)
+        db.commit()
+        return {"order": None, "preorders_created": preorders_created}
+
+    order.subtotal = subtotal
+    order.delivery_fee = 0            # V1: no delivery fee module
+    order.total = subtotal
+
+    db.add(Notification(user_id=user.id, type="order",
+                        title="Order received",
+                        body=f"Order #{order.ref} received — "
+                             f"{int(order.total):,} RWF. We will confirm it shortly.",
+                        order_ref=order.ref))
     db.commit()
     db.refresh(order)
 
-    # Fire the mobile-money push payment request (non-blocking best-effort)
-    if farmer and payload.payment_method in ("mtn_momo", "airtel"):
-        payment_result = await request_payment(payload.payment_method, farmer.phone, total, order.ref)
-        if payment_result and payment_result.get("status") == "pending":
-            pass  # webhook will update payment_status when it lands
-        send_order_update_sms(farmer.phone, order.ref, "confirmed, awaiting payment confirmation")
+    send_sms(user.phone, f"Tubura: order #{order.ref} received. "
+                         f"Total {int(order.total):,} RWF.")
 
-    return order.to_dict()
+    result = order_json(order)
+    result["preorders_created"] = preorders_created
+    return result
 
 
-@router.get("")
-def list_orders(
-    phone: str | None = Query(default=None),
-    db: Session = Depends(get_db),
-    current_farmer: Farmer | None = Depends(get_optional_farmer),
-):
-    farmer = current_farmer
-    if farmer is None and phone:
-        farmer = db.query(Farmer).filter(Farmer.phone == normalize_phone(phone)).first()
-    if farmer is None:
-        return []
-    orders = (
-        db.query(Order)
-        .filter(Order.farmer_id == farmer.id)
-        .order_by(Order.created_at.desc())
-        .all()
-    )
-    return [o.to_dict() for o in orders]
+@router.get("/orders")
+def my_orders(user: User = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    orders = (db.query(Order).filter(Order.user_id == user.id)
+                .order_by(Order.id.desc()).all())
+    return [order_json(o) for o in orders]
 
 
-@router.get("/{ref}")
-def get_order(ref: str, db: Session = Depends(get_db)):
-    order = db.query(Order).filter(Order.ref == ref).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return order.to_dict()
+@router.get("/orders/{ref}")
+def get_order(ref: str, user: User = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    o = db.query(Order).filter(Order.ref == ref,
+                               Order.user_id == user.id).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    return order_json(o)
 
 
-@router.post("/{ref}/cancel")
-def cancel_order(ref: str, db: Session = Depends(get_db)):
-    order = db.query(Order).filter(Order.ref == ref).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.status in ("delivered", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"Cannot cancel an order that is {order.status}")
+@router.post("/orders/{ref}/cancel")
+def cancel_order(ref: str, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    o = db.query(Order).filter(Order.ref == ref,
+                               Order.user_id == user.id).first()
+    if not o:
+        raise HTTPException(404, "Order not found")
+    if o.status not in ("pending", "confirmed"):
+        raise HTTPException(400, f"Cannot cancel an order that is {o.status}")
 
-    order.status = "cancelled"
-    order.payment_status = "refunded" if order.payment_status == "paid" else "cancelled"
-    if order.farmer:
-        db.add(
-            Notification(
-                farmer_id=order.farmer_id,
-                category="order",
-                title="Order cancelled",
-                body=f"Order #{order.ref} was cancelled and any payment will be refunded.",
-                order_id=order.ref,
-            )
-        )
-        send_order_update_sms(order.farmer.phone, order.ref, "cancelled — refund initiated")
+    # Restore stock to the retailers it was taken from
+    from app.models import RetailerStock
+    for item in o.items:
+        if item.retailer_id and item.product_id:
+            row = (db.query(RetailerStock)
+                     .filter_by(retailer_id=item.retailer_id,
+                                product_id=item.product_id).first())
+            if row:
+                row.quantity += item.qty
+    o.status = "cancelled"
+    o.updated_at = datetime.utcnow()
+    db.add(Notification(user_id=user.id, type="order",
+                        title="Order cancelled",
+                        body=f"Order #{o.ref} has been cancelled.",
+                        order_ref=o.ref))
     db.commit()
-    return order.to_dict()
-
-
-def _mark_paid(db: Session, order: Order):
-    order.payment_status = "paid"
-    order.status = "processing" if order.status == "confirmed" else order.status
-    if order.farmer:
-        db.add(
-            Notification(
-                farmer_id=order.farmer_id,
-                category="order",
-                title="Payment received",
-                body=f"Payment for order #{order.ref} was received. Your order is now being processed.",
-                order_id=order.ref,
-            )
-        )
-        send_order_update_sms(order.farmer.phone, order.ref, "payment received, processing")
-    db.commit()
-
-
-@router.post("/payments/mtn/callback")
-async def mtn_momo_callback(request: Request, db: Session = Depends(get_db)):
-    """MTN MoMo Collections webhook. Payload shape varies by integration;
-    we look for an externalId matching our order ref and a success status."""
-    data = await request.json()
-    order_ref = data.get("externalId") or data.get("reference")
-    status_val = (data.get("status") or "").upper()
-    order = db.query(Order).filter(Order.ref == order_ref).first()
-    if order and status_val == "SUCCESSFUL":
-        _mark_paid(db, order)
-    return {"received": True}
-
-
-@router.post("/payments/airtel/callback")
-async def airtel_callback(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
-    transaction = data.get("transaction", {})
-    order_ref = transaction.get("id") or data.get("reference")
-    status_val = (transaction.get("status") or data.get("status") or "").upper()
-    order = db.query(Order).filter(Order.ref == order_ref).first()
-    if order and status_val in ("SUCCESS", "TS"):
-        _mark_paid(db, order)
-    return {"received": True}
+    return {"ok": True, "status": o.status}

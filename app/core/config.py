@@ -1,66 +1,44 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # ── Required ──────────────────────────────────────────────────────────
+    DATABASE_URL: str
+    SECRET_KEY: str = "change-me-in-production"
 
-    # Database
-    DATABASE_URL: str = "postgresql://tubura_user:yourpassword@localhost:5432/tubura_db"
+    # ── First admin (used by seed.py and the /admin backdoor) ────────────
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: str = "change-me"
+
+    # ── Africa's Talking SMS (optional — SMS is skipped if missing) ──────
+    AT_USERNAME: str = ""
+    AT_API_KEY: str = ""
+    AT_SENDER: str = ""
+
+    # ── Misc ──────────────────────────────────────────────────────────────
+    APP_ENV: str = "development"          # development | production
+    CORS_ORIGINS: str = "*"               # comma-separated list, or *
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30   # 30 days
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"   # ignore any leftover env vars from the old app
 
     @property
     def SQLALCHEMY_DATABASE_URL(self) -> str:
-        """
-        Normalizes DATABASE_URL to always use the psycopg3 driver
-        (postgresql+psycopg://) regardless of what scheme the hosting
-        provider gives us. Some providers (Railway, Heroku, etc.) hand out
-        `postgres://` or plain `postgresql://`, both of which SQLAlchemy
-        would otherwise resolve to the psycopg2 driver — and psycopg2-binary
-        depends on a system-installed libpq that many minimal container
-        images (including Railway's) don't ship, causing an ImportError at
-        startup. psycopg[binary] bundles its own libpq, so switching the
-        dialect prefix avoids that class of deployment failure entirely.
-        """
+        """Railway gives postgresql://; psycopg3 wants postgresql+psycopg://."""
         url = self.DATABASE_URL
         if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
-        if url.startswith("postgresql://"):
+            url = url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+psycopg://", 1)
         return url
 
-    # Security
-    SECRET_KEY: str = "change-this-to-a-long-random-string-in-production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
-    ALGORITHM: str = "HS256"
-
-    # Africa's Talking
-    AT_USERNAME: str = "sandbox"
-    AT_API_KEY: str = ""
-    AT_SENDER_ID: str = "TUBURA"
-
-    # MTN MoMo
-    MTN_MOMO_BASE_URL: str = "https://sandbox.momodeveloper.mtn.com"
-    MTN_MOMO_SUBSCRIPTION_KEY: str = ""
-    MTN_MOMO_API_USER: str = ""
-    MTN_MOMO_API_KEY: str = ""
-    MTN_MOMO_ENVIRONMENT: str = "sandbox"
-
-    # Airtel Money
-    AIRTEL_BASE_URL: str = "https://openapi.airtel.africa"
-    AIRTEL_CLIENT_ID: str = ""
-    AIRTEL_CLIENT_SECRET: str = ""
-    AIRTEL_ENVIRONMENT: str = "sandbox"
-
-    # App
-    APP_ENV: str = "development"
-    FRONTEND_ORIGIN: str = "http://localhost:3000"
-
-    # Admin dashboard (/admin) login — change these in production!
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "change-this-password"
-
-    # OTP
-    OTP_LENGTH: int = 6
-    OTP_EXPIRE_MINUTES: int = 5
+    @property
+    def cors_origin_list(self) -> list[str]:
+        if self.CORS_ORIGINS.strip() == "*":
+            return ["*"]
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
 
 settings = Settings()

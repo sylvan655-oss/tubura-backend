@@ -1,52 +1,29 @@
 """
-SMS delivery via Africa's Talking.
-
-Falls back to logging (no-op) when AT_API_KEY is not configured, so the rest
-of the app works fine in local/dev environments without real credentials.
+SMS via Africa's Talking. If AT_USERNAME / AT_API_KEY are not configured,
+messages are printed to the server log instead of sent — so development
+and testing work without an SMS account.
 """
-import logging
-
 from app.core.config import settings
 
-logger = logging.getLogger("tubura.sms")
-
-_gateway = None
-
-
-def _get_gateway():
-    global _gateway
-    if _gateway is not None:
-        return _gateway
-    if not settings.AT_API_KEY:
-        return None
+_at_sms = None
+if settings.AT_USERNAME and settings.AT_API_KEY:
     try:
         import africastalking
-
         africastalking.initialize(settings.AT_USERNAME, settings.AT_API_KEY)
-        _gateway = africastalking.SMS
-        return _gateway
-    except Exception as e:  # pragma: no cover
-        logger.warning("Could not initialize Africa's Talking SDK: %s", e)
-        return None
+        _at_sms = africastalking.SMS
+    except Exception as e:      # pragma: no cover
+        print(f"[sms] Africa's Talking init failed: {e}")
 
 
-def send_sms(phone: str, message: str) -> bool:
-    gateway = _get_gateway()
-    if gateway is None:
-        logger.info("[SMS:DEV-MODE] to=%s message=%s", phone, message)
-        return True
+def send_sms(phone: str, message: str) -> None:
+    if _at_sms is None:
+        print(f"[sms:DEV] to {phone}: {message}")
+        return
     try:
-        gateway.send(message, [phone], sender_id=settings.AT_SENDER_ID or None)
-        return True
-    except Exception as e:  # pragma: no cover
-        logger.error("Failed to send SMS to %s: %s", phone, e)
-        return False
-
-
-def send_otp_sms(phone: str, code: str) -> bool:
-    return send_sms(phone, f"Your Tubura verification code is {code}. It expires in "
-                            f"{settings.OTP_EXPIRE_MINUTES} minutes.")
-
-
-def send_order_update_sms(phone: str, order_ref: str, status: str) -> bool:
-    return send_sms(phone, f"Tubura order #{order_ref} update: {status}.")
+        kwargs = {}
+        if settings.AT_SENDER:
+            kwargs["sender_id"] = settings.AT_SENDER
+        _at_sms.send(message, [phone], **kwargs)
+    except Exception as e:
+        # Never let SMS failure break an order or signup
+        print(f"[sms] send failed to {phone}: {e}")
