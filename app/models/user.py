@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date
 from app.db.session import Base
 
 
@@ -8,6 +8,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
+    customer_code = Column(String(20), unique=True, index=True, nullable=True)  # e.g. NYA-48291
     phone = Column(String(20), unique=True, index=True, nullable=False)
     name = Column(String(120), nullable=False)
     email = Column(String(150), nullable=True)
@@ -16,6 +17,9 @@ class User(Base):
     # What kind of customer this is: farmer, homeowner, ngo, school,
     # cooperative, business, government, individual
     customer_type = Column(String(40), nullable=True)
+    gender = Column(String(20), nullable=True)          # male | female | other
+    dob = Column(Date, nullable=True)                   # date of birth
+    language = Column(String(5), nullable=True)         # en | rw | fr
 
     # ── Default delivery address (collected at registration) ─────────────
     province = Column(String(60), nullable=True)

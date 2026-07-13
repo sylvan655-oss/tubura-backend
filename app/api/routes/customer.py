@@ -89,6 +89,19 @@ def mark_read(notif_id: int, user: User = Depends(get_current_user),
     return {"ok": True}
 
 
+@router.get("/banners")
+def banner_list(db: Session = Depends(get_db)):
+    """Up to 5 newest sent banners — the app's Home carousel. Public."""
+    rows = (db.query(Notification)
+              .filter(Notification.user_id.is_(None),
+                      Notification.type == "banner",
+                      Notification.send_status == "sent")
+              .order_by(Notification.id.desc()).limit(5).all())
+    return [{"id": n.id, "title": n.title, "body": n.body, "image": n.image,
+             "button_text": n.button_text, "button_link": n.button_link,
+             "created_at": n.created_at.isoformat()} for n in rows]
+
+
 @router.get("/banner")
 def current_banner(db: Session = Depends(get_db)):
     """Latest sent announcement banner, for the Home screen. Public."""
