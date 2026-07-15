@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_admin, require_superadmin, require_perm
+from app.api.deps import get_current_admin, require_superadmin, require_perm, require_hq
 from app.core.security import verify_password, hash_password, create_token
 from app.db.session import get_db
 from app.models import (Administrator, Category, Product, Retailer,
@@ -36,15 +36,18 @@ def admin_login(body: AdminLoginIn, db: Session = Depends(get_db)):
         raise HTTPException(401, "Wrong username or password")
     if not admin.is_active:
         raise HTTPException(403, "This admin account is disabled")
+    retailer = db.get(Retailer, admin.retailer_id) if admin.retailer_id else None
     return {"token": create_token(admin.id, "admin"),
             "username": admin.username, "role": admin.role,
-            "permissions": admin.permissions}
+            "permissions": admin.permissions,
+            "retailer_id": admin.retailer_id,
+            "retailer_name": retailer.name if retailer else None}
 
 
 # ── DASHBOARD SUMMARY ──────────────────────────────────────────────────────
 
 @router.get("/summary")
-def summary(admin=Depends(get_current_admin), db: Session = Depends(get_db)):
+def summary(admin=Depends(require_hq), db: Session = Depends(get_db)):
     products = db.query(Product).filter(Product.status == "active").all()
     totals = stock_totals(db, [p.id for p in products])
     out_of_stock = sum(1 for p in products if totals.get(p.id, 0) <= 0)
@@ -52,7 +55,7 @@ def summary(admin=Depends(get_current_admin), db: Session = Depends(get_db)):
                     if 0 < totals.get(p.id, 0) <= p.low_stock_threshold)
     return {
         "orders_waiting": db.query(Order)
-            .filter(Order.status == "pending").count(),
+            .filter(Order.status == "confirmed").count(),
         "preorders_waiting": db.query(PreOrder)
             .filter(PreOrder.status.in_(["received", "under_review"])).count(),
         "out_of_stock_products": out_of_stock,
@@ -134,6 +137,10 @@ class ProductIn(BaseModel):
     featured: bool = False
     status: str = "active"          # active | hidden
     img: str | None = None
+    guide_en: str | None = None
+    guide_rw: str | None = None
+    guide_fr: str | None = None
+    guide_video: str | None = None
 
 
 @router.get("/products")
@@ -179,6 +186,8 @@ def admin_products(admin=Depends(require_perm('products')),
             "description_rw": p.description_rw,
             "description_fr": p.description_fr,
             "specifications": p.specifications,
+            "guide_en": p.guide_en, "guide_rw": p.guide_rw,
+            "guide_fr": p.guide_fr, "guide_video": p.guide_video,
             "updated_at": p.updated_at.isoformat(),
         })
     return out
@@ -320,14 +329,14 @@ def set_stock(body: StockIn, admin=Depends(require_perm('stock')),
 
 # ── ORDERS ─────────────────────────────────────────────────────────────────
 
-ORDER_STATUSES = ["pending", "confirmed", "preparing", "ready",
-                  "delivered", "cancelled"]
+ORDER_STATUSES = ["confirmed", "ready", "delivered", "received", "cancelled"]
 
 STATUS_MESSAGES = {
     "confirmed": "has been confirmed",
     "preparing": "is being prepared",
     "ready": "is ready for delivery/pickup",
-    "delivered": "has been delivered. Thank you!",
+    "delivered": "has been delivered",
+    "received": "is complete. Thank you for shopping with Tubura!",
     "cancelled": "has been cancelled",
 }
 
@@ -338,6 +347,9 @@ def admin_orders(admin=Depends(require_perm('orders')),
                  status: str | None = None,
                  search: str | None = None):
     q = db.query(Order)
+    if admin.retailer_id:
+        q = (q.join(OrderItem, OrderItem.order_id == Order.id)
+              .filter(OrderItem.retailer_id == admin.retailer_id).distinct())
     if status:
         q = q.filter(Order.status == status)
     if search:
@@ -350,7 +362,9 @@ def admin_orders(admin=Depends(require_perm('orders')),
         "id": o.id, "ref": o.ref,
         "customer": o.user.name if o.user else None,
         "phone": o.user.phone if o.user else None,
+        "subtotal": o.subtotal, "delivery_fee": o.delivery_fee, "tax": o.tax,
         "total": o.total, "status": o.status,
+        "fulfillment": o.fulfillment or "delivery",
         "items_count": len(o.items),
         "district": o.district, "sector": o.sector,
         "cell": o.cell, "village": o.village,
@@ -358,8 +372,10 @@ def admin_orders(admin=Depends(require_perm('orders')),
         "created_at": o.created_at.isoformat(),
         "items": [{"id": i.id, "name": i.name, "qty": i.qty,
                    "price": i.price, "retailer_id": i.retailer_id,
-                   "retailer": i.retailer.name if i.retailer else None}
-                  for i in o.items],
+                   "retailer": i.retailer.name if i.retailer else None,
+                   "retailer_phone": i.retailer.phone if i.retailer else None}
+                  for i in o.items
+                  if not admin.retailer_id or i.retailer_id == admin.retailer_id],
     } for o in orders]
 
 
@@ -376,6 +392,12 @@ def set_order_status(order_id: int, body: StatusIn,
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404, "Order not found")
+    if admin.retailer_id:
+        if not any(i.retailer_id == admin.retailer_id for i in o.items):
+            raise HTTPException(403, "This order is not fulfilled by your shop")
+        if body.status not in ("ready", "delivered", "received"):
+            raise HTTPException(403, "Retailer accounts can only mark orders "
+                                     "Ready, Delivered or Received")
 
     # Cancelling from the dashboard also restores stock
     if body.status == "cancelled" and o.status != "cancelled":
@@ -409,6 +431,8 @@ class ReassignIn(BaseModel):
 def reassign_item(item_id: int, body: ReassignIn,
                   admin=Depends(require_perm('orders')),
                   db: Session = Depends(get_db)):
+    if admin.retailer_id:
+        raise HTTPException(403, "Retailer accounts cannot reassign suppliers")
     item = db.get(OrderItem, item_id)
     if not item:
         raise HTTPException(404, "Order item not found")
@@ -636,6 +660,7 @@ class AdminIn(BaseModel):
     role: str = "admin"
     permissions: list[str] = []
     is_active: bool = True
+    retailer_id: int | None = None    # set -> retailer account (orders-only)
 
 
 @router.get("/admins")
@@ -644,6 +669,7 @@ def list_admins(admin=Depends(require_superadmin),
     rows = db.query(Administrator).order_by(Administrator.id).all()
     return [{"id": a.id, "username": a.username, "email": a.email,
              "role": a.role, "permissions": a.permissions,
+             "retailer_id": a.retailer_id,
              "is_active": a.is_active} for a in rows]
 
 
@@ -654,10 +680,13 @@ def add_admin(body: AdminIn, admin=Depends(require_superadmin),
         raise HTTPException(400, "Password must be at least 8 characters")
     if db.query(Administrator).filter_by(username=body.username).first():
         raise HTTPException(400, "Username already taken")
+    role = "admin" if body.retailer_id else body.role
+    perms = ["orders"] if body.retailer_id else body.permissions
     a = Administrator(username=body.username,
                       password_hash=hash_password(body.password),
-                      email=body.email, role=body.role,
-                      permissions=body.permissions, is_active=body.is_active)
+                      email=body.email, role=role,
+                      permissions=perms, is_active=body.is_active,
+                      retailer_id=body.retailer_id)
     db.add(a); db.commit(); db.refresh(a)
     return {"id": a.id}
 
@@ -671,8 +700,9 @@ def edit_admin(admin_id: int, body: AdminIn,
         raise HTTPException(404, "Admin not found")
     a.username = body.username
     a.email = body.email
-    a.role = body.role
-    a.permissions = body.permissions
+    a.retailer_id = body.retailer_id
+    a.role = "admin" if body.retailer_id else body.role
+    a.permissions = ["orders"] if body.retailer_id else body.permissions
     a.is_active = body.is_active
     if body.password:
         a.password_hash = hash_password(body.password)

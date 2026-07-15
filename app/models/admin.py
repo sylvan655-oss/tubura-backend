@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey
 from app.db.session import Base
 
 
@@ -18,6 +18,7 @@ class Administrator(Base):
     # Fine-grained permissions, e.g. ["products", "orders", "preorders",
     # "customers", "notifications", "support", "admins"]
     permissions = Column(JSON, nullable=False, default=list)
+    retailer_id = Column(Integer, ForeignKey("retailers.id"), nullable=True)  # set -> retailer account
 
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

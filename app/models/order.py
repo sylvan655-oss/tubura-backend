@@ -19,9 +19,11 @@ class Order(Base):
 
     # pending | confirmed | preparing | ready | delivered | cancelled
     status = Column(String(20), nullable=False, default="pending")
+    fulfillment = Column(String(12), nullable=False, default="delivery")  # delivery | pickup
 
     subtotal = Column(Float, nullable=False, default=0)
     delivery_fee = Column(Float, nullable=False, default=0)
+    tax = Column(Float, nullable=False, default=0)
     total = Column(Float, nullable=False, default=0)
 
     # ── Delivery address snapshot ─────────────────────────────────────────

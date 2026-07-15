@@ -51,6 +51,8 @@ def product_json(p: Product, total: int, lang: str) -> dict:
         "featured": p.featured,
         "stock": total,                                   # exact number
         "stock_label": stock_label(total, p.low_stock_threshold),
+        "guide": pick(p, "guide", lang) if p.guide_en else None,
+        "guide_video": p.guide_video,
     }
 
 

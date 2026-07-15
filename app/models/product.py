@@ -41,6 +41,12 @@ class Product(Base):
     # Free-text specifications shown on the product page (optional)
     specifications = Column(Text, nullable=True)
 
+    # One-page usage guide shown to customers after purchase (optional)
+    guide_en = Column(Text, nullable=True)
+    guide_rw = Column(Text, nullable=True)
+    guide_fr = Column(Text, nullable=True)
+    guide_video = Column(String(300), nullable=True)   # optional video link
+
     price = Column(Float, nullable=False)           # RWF, fixed nationally
 
     # Admin sets this once in a while, per product. 50 for seed packs,

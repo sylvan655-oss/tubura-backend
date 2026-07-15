@@ -226,3 +226,52 @@ def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
     db.delete(otp)          # single-use
     db.commit()
     return {"ok": True}
+
+
+class ChangePhoneIn(BaseModel):
+    new_phone: str
+    code: str
+
+
+@router.post("/change-phone")
+def change_phone(body: ChangePhoneIn, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Change the login phone number — requires an SMS code sent to the NEW number."""
+    otp = (db.query(OTP)
+             .filter(OTP.phone == body.new_phone, OTP.code == body.code,
+                     OTP.expires_at > datetime.utcnow())
+             .order_by(OTP.id.desc()).first())
+    if not otp:
+        raise HTTPException(400, "Invalid or expired code")
+    taken = db.query(User).filter(User.phone == body.new_phone,
+                                  User.id != user.id).first()
+    if taken:
+        raise HTTPException(400, "An account with this phone already exists")
+    user.phone = body.new_phone
+    db.delete(otp)          # single-use
+    db.commit()
+    return _profile(user)
+
+
+class QuickUpdateIn(BaseModel):
+    password: str
+    name: str | None = None
+    phone: str | None = None
+
+
+@router.post("/update-profile")
+def quick_update(body: QuickUpdateIn, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Quick name/phone change, confirmed by the account password (no SMS)."""
+    if not verify_password(body.password, user.password_hash or ""):
+        raise HTTPException(400, "Wrong password")
+    if body.phone:
+        taken = db.query(User).filter(User.phone == body.phone,
+                                      User.id != user.id).first()
+        if taken:
+            raise HTTPException(400, "An account with this phone already exists")
+        user.phone = body.phone
+    if body.name and body.name.strip():
+        user.name = body.name.strip()
+    db.commit()
+    return _profile(user)

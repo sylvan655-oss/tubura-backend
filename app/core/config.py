@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production"
 
     # ── First admin (used by seed.py and the /admin backdoor) ────────────
+    TAX_RATE: float = 0.0                     # off for now; set e.g. 0.18 in Railway to enable VAT
+    DELIVERY_FEE_SAME_DISTRICT: int = 1000    # RWF
+    DELIVERY_FEE_SAME_PROVINCE: int = 2000
+    DELIVERY_FEE_OTHER: int = 3000
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "change-me"
 
