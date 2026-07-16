@@ -39,6 +39,12 @@ class PreOrder(Base):
     converted_order_id = Column(Integer, ForeignKey("orders.id"),
                                 nullable=True)
 
+    # C1 reservation: set by HQ when readying the pre-order for the customer
+    unit_price = Column(Integer, nullable=True)        # RWF per unit
+    reserved_qty = Column(Integer, nullable=True)      # units held for this customer
+    fulfiller_id = Column(Integer, ForeignKey("retailers.id"), nullable=True)  # supplying shop
+    denied = Column(Integer, nullable=False, default=0)   # 0=not denied, 1=denied
+
     note = Column(Text, nullable=True)
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

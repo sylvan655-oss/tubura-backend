@@ -1,8 +1,8 @@
-"""v1.1 fresh schema
+"""fresh schema
 
-Revision ID: c033a189c9aa
+Revision ID: 4f26029572cd
 Revises: 
-Create Date: 2026-07-15 13:26:12.072977
+Create Date: 2026-07-16 19:41:05.834548
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'c033a189c9aa'
+revision: str = '4f26029572cd'
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -223,11 +223,16 @@ def upgrade() -> None:
     sa.Column('status', sa.String(length=20), nullable=False),
     sa.Column('assigned_admin_id', sa.Integer(), nullable=True),
     sa.Column('converted_order_id', sa.Integer(), nullable=True),
+    sa.Column('unit_price', sa.Integer(), nullable=True),
+    sa.Column('reserved_qty', sa.Integer(), nullable=True),
+    sa.Column('fulfiller_id', sa.Integer(), nullable=True),
+    sa.Column('denied', sa.Integer(), nullable=False),
     sa.Column('note', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['assigned_admin_id'], ['administrators.id'], ),
     sa.ForeignKeyConstraint(['converted_order_id'], ['orders.id'], ),
+    sa.ForeignKeyConstraint(['fulfiller_id'], ['retailers.id'], ),
     sa.ForeignKeyConstraint(['product_id'], ['products.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')

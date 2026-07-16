@@ -475,8 +475,49 @@ def admin_preorders(admin=Depends(require_perm('preorders')),
              "requested_qty": p.requested_qty,
              "stock_at_request": p.stock_at_request,
              "status": p.status,
+             "unit_price": p.unit_price, "reserved_qty": p.reserved_qty,
+             "fulfiller_id": p.fulfiller_id,
+             "fulfiller": (db.get(Retailer, p.fulfiller_id).name
+                           if p.fulfiller_id else None),
+             "denied": p.denied,
              "converted_order_id": p.converted_order_id,
              "created_at": p.created_at.isoformat()} for p in rows]
+
+
+class PreorderReadyIn(BaseModel):
+    unit_price: int
+    reserved_qty: int
+    fulfiller_id: int
+
+
+@router.put("/preorders/{po_id}/ready")
+def ready_preorder(po_id: int, body: PreorderReadyIn,
+                   admin=Depends(require_perm('preorders')),
+                   db: Session = Depends(get_db)):
+    """Reserve the arrived item for this customer: price + qty + supplying shop.
+    Makes a private Buy-now offer appear on their pre-order. Not public stock."""
+    p = db.get(PreOrder, po_id)
+    if not p:
+        raise HTTPException(404, "Pre-order not found")
+    if body.unit_price <= 0 or body.reserved_qty <= 0:
+        raise HTTPException(400, "Price and quantity must be positive")
+    if not db.get(Retailer, body.fulfiller_id):
+        raise HTTPException(400, "Choose a valid fulfilling shop")
+    p.unit_price = body.unit_price
+    p.reserved_qty = body.reserved_qty
+    p.fulfiller_id = body.fulfiller_id
+    p.status = "ready"
+    p.denied = 0
+    p.assigned_admin_id = admin.id
+    p.updated_at = datetime.utcnow()
+    if p.user:
+        db.add(Notification(user_id=p.user_id, type="order",
+                            title="Pre-order ready to buy",
+                            body=f"Your pre-order for {p.product_name} is ready. "
+                                 f"{body.reserved_qty} reserved at "
+                                 f"{body.unit_price:,} RWF each — open the app to buy."))
+    db.commit()
+    return {"ok": True}
 
 
 @router.put("/preorders/{po_id}/status")
@@ -489,6 +530,8 @@ def set_preorder_status(po_id: int, body: StatusIn,
     if not p:
         raise HTTPException(404, "Pre-order not found")
     p.status = body.status
+    if body.status == "cancelled":
+        p.denied = 1
     p.assigned_admin_id = admin.id
     p.updated_at = datetime.utcnow()
     if p.user:

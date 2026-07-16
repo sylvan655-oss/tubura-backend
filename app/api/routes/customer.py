@@ -1,4 +1,5 @@
 import random
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -7,7 +8,9 @@ from sqlalchemy import or_, and_
 
 from app.api.deps import get_current_user, get_current_user_optional
 from app.db.session import get_db
-from app.models import (User, Product, PreOrder, Notification, SupportTicket)
+from app.models import (User, Product, PreOrder, Notification, SupportTicket,
+                        Order, OrderItem, Retailer)
+from app.api.routes.orders import new_ref
 from app.api.routes.catalog import stock_totals
 
 router = APIRouter(prefix="/api", tags=["customer"])
@@ -57,6 +60,11 @@ def my_preorders(user: User = Depends(get_current_user),
               .order_by(PreOrder.id.desc()).all())
     return [{"id": p.id, "product_name": p.product_name,
              "requested_qty": p.requested_qty, "status": p.status,
+             "unit_price": p.unit_price, "reserved_qty": p.reserved_qty,
+             "denied": bool(p.denied),
+             "buyable": bool(p.status == "ready" and p.unit_price
+                             and p.reserved_qty and not p.converted_order_id),
+             "converted_order_id": p.converted_order_id,
              "created_at": p.created_at.isoformat()} for p in rows]
 
 
@@ -148,3 +156,50 @@ def my_tickets(user: User = Depends(get_current_user),
     return [{"ticket_no": t.ticket_no, "subject": t.subject,
              "status": t.status, "created_at": t.created_at.isoformat()}
             for t in rows]
+
+
+class PreorderBuyIn(BaseModel):
+    fulfillment: str = "delivery"      # delivery | pickup
+    landmark: str | None = None
+
+
+@router.post("/preorders/{po_id}/buy")
+def buy_preorder(po_id: int, body: PreorderBuyIn,
+                 user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Turn a readied (reserved) pre-order into a real order — the reserved
+    stock is private to this customer, so nothing public is touched."""
+    p = db.get(PreOrder, po_id)
+    if not p or p.user_id != user.id:
+        raise HTTPException(404, "Pre-order not found")
+    if p.status != "ready" or not (p.unit_price and p.reserved_qty):
+        raise HTTPException(400, "This pre-order isn't ready to buy")
+    if p.converted_order_id:
+        raise HTTPException(400, "This pre-order has already been bought")
+
+    fulfillment = body.fulfillment if body.fulfillment in ("delivery", "pickup") else "delivery"
+    addr = dict(province=user.province, district=user.district,
+                sector=user.sector, cell=user.cell, village=user.village,
+                street=user.street,
+                landmark=(body.landmark or user.landmark))
+    subtotal = float(p.unit_price * p.reserved_qty)
+
+    order = Order(ref=new_ref(db, addr), user_id=user.id, status="confirmed",
+                  fulfillment=fulfillment, subtotal=subtotal,
+                  delivery_fee=0, tax=0, total=subtotal, **addr)
+    db.add(order); db.flush()
+    prod = db.get(Product, p.product_id) if p.product_id else None
+    db.add(OrderItem(order_id=order.id, product_id=p.product_id,
+                     name=p.product_name, qty=p.reserved_qty,
+                     price=float(p.unit_price), retailer_id=p.fulfiller_id,
+                     unit=(prod.unit_en if prod else None),
+                     img=(prod.img if prod else None)))
+    p.status = "ordered"
+    p.converted_order_id = order.id
+    p.updated_at = datetime.utcnow()
+    db.add(Notification(user_id=user.id, type="order",
+                        title="Order placed",
+                        body=f"Your pre-order for {p.product_name} is now order "
+                             f"#{order.ref}."))
+    db.commit()
+    return {"ok": True, "ref": order.ref, "order_id": order.id}
