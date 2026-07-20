@@ -12,12 +12,25 @@ from app.models import (User, Product, Order, OrderItem, PreOrder,
 from app.core.config import settings
 from app.services.assignment import allocate, closeness_score
 
-def _delivery_fee(addr: dict, retailers: list, fulfillment: str) -> float:
-    """Location-based flat fee: charged once per order, by the FARTHEST
-    retailer that has to ship (same district < same province < other)."""
+def _delivery_fee(db, addr: dict, retailers: list, fulfillment: str) -> float:
+    """Delivery fee charged once per order, by the FARTHEST retailer that
+    has to ship. Primary: real road distance (see services/distance.py)
+    mapped to km bands. Fallback: legacy administrative tiers whenever a
+    retailer has no coordinates yet or the village can't be resolved —
+    so checkout never breaks."""
     if fulfillment == "pickup" or not retailers:
         return 0.0
-    # tier per retailer: 1 = same district, 2 = same province, 3 = farther
+    from app.services.distance import road_km, fee_for_km
+    kms = []
+    for r in retailers:
+        result = road_km(db, r, addr)
+        if result is None:          # retailer missing GPS -> use tier fallback
+            kms = None
+            break
+        kms.append(result[0])
+    if kms is not None:
+        return float(fee_for_km(max(kms)))
+    # legacy tier fallback: 1 = same district, 2 = same province, 3 = farther
     tiers = [(1 if closeness_score(r, addr) >= 2 else
               (2 if closeness_score(r, addr) == 1 else 3)) for r in retailers]
     worst = max(tiers)
@@ -205,7 +218,7 @@ def create_order(body: OrderIn, user: User = Depends(get_current_user),
         db.commit()
         return {"order": None, "preorders_created": preorders_created}
 
-    fee = _delivery_fee(addr, [r for r in used_retailers.values() if r], fulfillment)
+    fee = _delivery_fee(db, addr, [r for r in used_retailers.values() if r], fulfillment)
     tax = round(subtotal * settings.TAX_RATE)
     order.subtotal = subtotal
     order.delivery_fee = fee
@@ -318,7 +331,7 @@ def quote_order(body: OrderIn, user: User = Depends(get_current_user),
     if subtotal == 0:
         raise HTTPException(400, "Nothing to quote")
 
-    fee = _delivery_fee(addr, list(retailers.values()), fulfillment)
+    fee = _delivery_fee(db, addr, list(retailers.values()), fulfillment)
     tax = round(subtotal * settings.TAX_RATE)
     return {
         "fulfillment": fulfillment,

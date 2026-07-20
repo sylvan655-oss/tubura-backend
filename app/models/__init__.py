@@ -13,9 +13,10 @@ from app.models.preorder import PreOrder
 from app.models.notification import Notification
 from app.models.support import SupportTicket
 from app.models.otp import OTP
+from app.models.delivery_distance import DeliveryDistance
 
 __all__ = [
     "User", "Administrator", "Category", "Product", "Retailer",
     "RetailerStock", "Order", "OrderItem", "PreOrder", "Notification",
-    "SupportTicket", "OTP",
+    "SupportTicket", "OTP", "DeliveryDistance",
 ]

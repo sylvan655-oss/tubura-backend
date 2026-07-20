@@ -8,11 +8,16 @@ class Settings(BaseSettings):
 
     # ── First admin (used by seed.py and the /admin backdoor) ────────────
     TAX_RATE: float = 0.0                     # off for now; set e.g. 0.18 in Railway to enable VAT
-    DELIVERY_FEE_SAME_DISTRICT: int = 1000    # RWF
+    DELIVERY_FEE_SAME_DISTRICT: int = 1000    # RWF (legacy tier fallback)
     DELIVERY_FEE_SAME_PROVINCE: int = 2000
     DELIVERY_FEE_OTHER: int = 3000
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "change-me"
+
+    # ── Distance-based delivery (OpenRouteService) ───────────────────────
+    ORS_API_KEY: str = ""                     # empty = skip ORS, use haversine fallback
+    DELIVERY_BANDS: str = "5:1000,15:2000,40:3500"   # "km:RWF" bands, ascending
+    DELIVERY_FEE_BEYOND: int = 5000           # RWF beyond the last band
 
     # ── Africa's Talking SMS (optional — SMS is skipped if missing) ──────
     AT_USERNAME: str = ""
