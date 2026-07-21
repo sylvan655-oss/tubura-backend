@@ -62,6 +62,7 @@ def my_preorders(user: User = Depends(get_current_user),
              "requested_qty": p.requested_qty, "status": p.status,
              "unit_price": p.unit_price, "reserved_qty": p.reserved_qty,
              "denied": bool(p.denied),
+             "admin_note": p.note,
              "buyable": bool(p.status == "ready" and p.unit_price
                              and p.reserved_qty and not p.converted_order_id),
              "converted_order_id": p.converted_order_id,

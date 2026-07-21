@@ -340,6 +340,16 @@ STATUS_MESSAGES = {
     "cancelled": "has been cancelled",
 }
 
+# Only these order statuses trigger an SMS (all statuses still create an
+# in-app notification). Edit this dict to change which texts farmers get.
+SMS_ORDER_STATUSES = ("ready", "delivered")
+SMS_ORDER_TEXT = {
+    "ready": ("Order #{ref} is ready. If you chose delivery it is on its way "
+              "to you; if you chose pickup you can collect it now."),
+    "delivered": ("Order #{ref} has been delivered. Please confirm receipt in "
+                  "the app. Thank you for shopping with Tubura!"),
+}
+
 
 @router.get("/orders")
 def admin_orders(admin=Depends(require_perm('orders')),
@@ -418,7 +428,11 @@ def set_order_status(order_id: int, body: StatusIn,
         db.add(Notification(user_id=o.user_id, type="order",
                             title=f"Order {body.status}",
                             body=msg, order_ref=o.ref))
-        send_sms(o.user.phone, "Tubura: " + msg)
+        # In-app notifications for every status, but SMS only for the two
+        # moments the customer must act on — keeps SMS costs down and avoids
+        # spamming farmers with confirmed/received/cancelled texts.
+        if body.status in SMS_ORDER_STATUSES:
+            send_sms(o.user.phone, "Tubura: " + SMS_ORDER_TEXT[body.status].format(ref=o.ref))
     db.commit()
     return {"ok": True, "status": o.status}
 
@@ -511,19 +525,30 @@ def ready_preorder(po_id: int, body: PreorderReadyIn,
     p.assigned_admin_id = admin.id
     p.updated_at = datetime.utcnow()
     if p.user:
+        shop = db.get(Retailer, body.fulfiller_id)
+        msg = (f"Your pre-order for {p.product_name} is APPROVED and ready to buy. "
+               f"{body.reserved_qty} reserved for you at {body.unit_price:,} RWF each"
+               f"{f' at {shop.name}' if shop else ''}. "
+               f"Open the Tubura app > Pre-orders > Buy now to complete it.")
         db.add(Notification(user_id=p.user_id, type="order",
-                            title="Pre-order ready to buy",
-                            body=f"Your pre-order for {p.product_name} is ready. "
-                                 f"{body.reserved_qty} reserved at "
-                                 f"{body.unit_price:,} RWF each — open the app to buy."))
+                            title="Pre-order approved - ready to buy", body=msg))
+        send_sms(p.user.phone, "Tubura: " + msg)
     db.commit()
     return {"ok": True}
 
 
+class PreorderStatusIn(BaseModel):
+    status: str
+    reason: str | None = None      # shown to the customer when denying
+
+
 @router.put("/preorders/{po_id}/status")
-def set_preorder_status(po_id: int, body: StatusIn,
+def set_preorder_status(po_id: int, body: PreorderStatusIn,
                         admin=Depends(require_perm('preorders')),
                         db: Session = Depends(get_db)):
+    """Status changes. SMS is sent ONLY for denial here — approval SMS is
+    sent by the /ready endpoint, which is the action that actually prices
+    and reserves the item (approved == ready to buy)."""
     if body.status not in PREORDER_STATUSES:
         raise HTTPException(400, f"Status must be one of {PREORDER_STATUSES}")
     p = db.get(PreOrder, po_id)
@@ -532,13 +557,25 @@ def set_preorder_status(po_id: int, body: StatusIn,
     p.status = body.status
     if body.status == "cancelled":
         p.denied = 1
+        if body.reason:
+            p.note = body.reason         # shown in app as "Note from Tubura"
     p.assigned_admin_id = admin.id
     p.updated_at = datetime.utcnow()
+
     if p.user:
-        db.add(Notification(user_id=p.user_id, type="order",
-                            title="Pre-order update",
-                            body=f"Your pre-order for {p.product_name} "
-                                 f"is now: {body.status.replace('_', ' ')}."))
+        if body.status == "cancelled":
+            msg = f"Sorry, your pre-order for {p.product_name} could not be fulfilled."
+            if body.reason:
+                msg += f" Reason: {body.reason}"
+            msg += " You can place a new pre-order anytime in the app."
+            db.add(Notification(user_id=p.user_id, type="order",
+                                title="Pre-order denied", body=msg))
+            send_sms(p.user.phone, "Tubura: " + msg)
+        else:
+            db.add(Notification(user_id=p.user_id, type="order",
+                                title="Pre-order update",
+                                body=f"Your pre-order for {p.product_name} "
+                                     f"is now: {body.status.replace('_', ' ')}."))
     db.commit()
     return {"ok": True}
 
