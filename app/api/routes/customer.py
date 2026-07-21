@@ -22,6 +22,14 @@ class PreOrderIn(BaseModel):
     product_id: int | None = None     # None = "couldn't find it" case
     product_name: str | None = None   # what the customer typed
     requested_qty: int = 1
+    # Commitment funnel fields the app already collects
+    needed_by: str | None = None
+    reason: str | None = None
+    accept_pay: bool = False
+    accept_delay: bool = False
+    province: str | None = None
+    district: str | None = None
+    sector: str | None = None
 
 
 @router.post("/preorders")
@@ -42,7 +50,13 @@ def create_preorder(body: PreOrderIn, user: User = Depends(get_current_user),
 
     po = PreOrder(user_id=user.id, product_id=body.product_id,
                   product_name=name, requested_qty=body.requested_qty,
-                  stock_at_request=stock_now, status="received")
+                  stock_at_request=stock_now, status="under_review",
+                  needed_by=body.needed_by, reason=body.reason,
+                  accept_pay=1 if body.accept_pay else 0,
+                  accept_delay=1 if body.accept_delay else 0,
+                  req_province=body.province or user.province,
+                  req_district=body.district or user.district,
+                  req_sector=body.sector or user.sector)
     db.add(po)
     db.add(Notification(user_id=user.id, type="order",
                         title="Pre-order received",
@@ -59,14 +73,37 @@ def my_preorders(user: User = Depends(get_current_user),
     rows = (db.query(PreOrder).filter(PreOrder.user_id == user.id)
               .order_by(PreOrder.id.desc()).all())
     return [{"id": p.id, "product_name": p.product_name,
-             "requested_qty": p.requested_qty, "status": p.status,
+             "requested_qty": p.requested_qty,
+             "status": ("under_review" if p.status == "received" else p.status),
              "unit_price": p.unit_price, "reserved_qty": p.reserved_qty,
              "denied": bool(p.denied),
              "admin_note": p.note,
              "buyable": bool(p.status == "ready" and p.unit_price
                              and p.reserved_qty and not p.converted_order_id),
+             "available_on": p.available_on,
+             "cancellable": bool(p.status not in ("ordered", "cancelled")
+                                 and not p.converted_order_id),
              "converted_order_id": p.converted_order_id,
              "created_at": p.created_at.isoformat()} for p in rows]
+
+
+@router.post("/preorders/{po_id}/cancel")
+def cancel_preorder(po_id: int, user: User = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """Customer drops their own pre-order. Any units committed to them go
+    straight back into public availability."""
+    p = db.get(PreOrder, po_id)
+    if not p or p.user_id != user.id:
+        raise HTTPException(404, "Pre-order not found")
+    if p.converted_order_id or p.status in ("ordered", "cancelled"):
+        raise HTTPException(400, "This pre-order can no longer be cancelled")
+
+    # Cancelling releases the commitment automatically: once the status is
+    # no longer "ready", those units stop being subtracted from availability.
+    p.status = "cancelled"
+    p.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 # ── NOTIFICATIONS ──────────────────────────────────────────────────────────

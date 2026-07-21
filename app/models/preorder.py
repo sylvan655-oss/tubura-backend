@@ -29,7 +29,8 @@ class PreOrder(Base):
     # (shown in the admin table as "Current Stock")
     stock_at_request = Column(Integer, nullable=True)
 
-    # received | under_review | approved | ordered | ready | cancelled
+    # under_review | ready | ordered | denied | cancelled
+    # ("ready" = approved AND buyable; legacy rows may say "received")
     status = Column(String(20), nullable=False, default="received")
 
     assigned_admin_id = Column(Integer, ForeignKey("administrators.id"),
@@ -45,7 +46,19 @@ class PreOrder(Base):
     fulfiller_id = Column(Integer, ForeignKey("retailers.id"), nullable=True)  # supplying shop
     denied = Column(Integer, nullable=False, default=0)   # 0=not denied, 1=denied
 
-    note = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)          # shown to customer as "Note from Tubura"
+
+    # What the customer told us when requesting (captured by the app form)
+    needed_by = Column(String(20), nullable=True)      # date string, e.g. "2026-08-15"
+    reason = Column(Text, nullable=True)               # "for my 2-hectare maize plot"
+    accept_pay = Column(Integer, nullable=True)        # 1 = ticked "I will pay once approved"
+    accept_delay = Column(Integer, nullable=True)      # 1 = ticked "some products take time"
+    req_province = Column(String(80), nullable=True)   # where they want it delivered
+    req_district = Column(String(80), nullable=True)
+    req_sector = Column(String(80), nullable=True)
+
+    # HQ's realistic estimate of when the goods will land
+    available_on = Column(String(20), nullable=True)
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow,

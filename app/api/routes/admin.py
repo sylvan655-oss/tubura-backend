@@ -15,7 +15,8 @@ from app.db.session import get_db
 from app.models import (Administrator, Category, Product, Retailer,
                         RetailerStock, Order, OrderItem, PreOrder, User,
                         Notification, SupportTicket)
-from app.api.routes.catalog import stock_totals, stock_label
+from app.api.routes.catalog import (stock_totals, stock_label,
+                                    shop_totals, committed_totals)
 from app.services.sms import send_sms
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -50,6 +51,8 @@ def admin_login(body: AdminLoginIn, db: Session = Depends(get_db)):
 def summary(admin=Depends(require_hq), db: Session = Depends(get_db)):
     products = db.query(Product).filter(Product.status == "active").all()
     totals = stock_totals(db, [p.id for p in products])
+    shop = shop_totals(db, [p.id for p in products])
+    held = committed_totals(db, [p.id for p in products])
     out_of_stock = sum(1 for p in products if totals.get(p.id, 0) <= 0)
     low_stock = sum(1 for p in products
                     if 0 < totals.get(p.id, 0) <= p.low_stock_threshold)
@@ -166,6 +169,8 @@ def admin_products(admin=Depends(require_perm('products')),
                          Product.brand.ilike(like)))
     products = q.order_by(Product.id.desc()).all()
     totals = stock_totals(db, [p.id for p in products])
+    shop = shop_totals(db, [p.id for p in products])
+    held = committed_totals(db, [p.id for p in products])
 
     out = []
     for p in products:
@@ -179,6 +184,8 @@ def admin_products(admin=Depends(require_perm('products')),
             "category_id": p.category_id,
             "category": p.category.name_en if p.category else None,
             "price": p.price, "stock_total": total, "stock_label": label,
+            "stock_in_shops": shop.get(p.id, 0),
+            "stock_committed": held.get(p.id, 0),
             "low_stock_threshold": p.low_stock_threshold,
             "featured": p.featured, "status": p.status, "img": p.img,
             "unit_en": p.unit_en, "unit_rw": p.unit_rw, "unit_fr": p.unit_fr,
@@ -470,8 +477,13 @@ def reassign_item(item_id: int, body: ReassignIn,
 
 # ── PRE-ORDERS ─────────────────────────────────────────────────────────────
 
-PREORDER_STATUSES = ["received", "under_review", "approved", "ordered",
-                     "ready", "cancelled"]
+# "ready" means APPROVED AND BUYABLE — approval and readiness are one step.
+PREORDER_STATUSES = ["under_review", "approved", "ordered",
+                     "ready", "denied", "cancelled"]
+DENIAL_STATUSES = ("denied", "cancelled")
+
+# Legacy rows created before the "Received" tab was removed.
+LEGACY_PREORDER_STATUS = {"received": "under_review"}
 
 
 @router.get("/preorders")
@@ -488,13 +500,19 @@ def admin_preorders(admin=Depends(require_perm('preorders')),
              "product_id": p.product_id, "product_name": p.product_name,
              "requested_qty": p.requested_qty,
              "stock_at_request": p.stock_at_request,
-             "status": p.status,
+             "status": LEGACY_PREORDER_STATUS.get(p.status, p.status),
              "unit_price": p.unit_price, "reserved_qty": p.reserved_qty,
              "fulfiller_id": p.fulfiller_id,
              "fulfiller": (db.get(Retailer, p.fulfiller_id).name
                            if p.fulfiller_id else None),
              "denied": p.denied,
+             "needed_by": p.needed_by, "reason": p.reason,
+             "accept_pay": p.accept_pay, "accept_delay": p.accept_delay,
+             "req_province": p.req_province, "req_district": p.req_district,
+             "req_sector": p.req_sector,
+             "available_on": p.available_on, "admin_note": p.note,
              "converted_order_id": p.converted_order_id,
+             "updated_at": p.updated_at.isoformat() if p.updated_at else None,
              "created_at": p.created_at.isoformat()} for p in rows]
 
 
@@ -502,6 +520,8 @@ class PreorderReadyIn(BaseModel):
     unit_price: int
     reserved_qty: int
     fulfiller_id: int
+    available_on: str | None = None    # when the goods are expected
+    admin_note: str | None = None      # shown to the customer
 
 
 @router.put("/preorders/{po_id}/ready")
@@ -517,9 +537,17 @@ def ready_preorder(po_id: int, body: PreorderReadyIn,
         raise HTTPException(400, "Price and quantity must be positive")
     if not db.get(Retailer, body.fulfiller_id):
         raise HTTPException(400, "Choose a valid fulfilling shop")
+    # No stock check here on purpose: Tubura approves (and commits the
+    # customer) while the goods are still being sourced. The reserved units
+    # are subtracted from public availability by catalog.committed_totals,
+    # so nobody else can buy them once they do arrive.
     p.unit_price = body.unit_price
     p.reserved_qty = body.reserved_qty
     p.fulfiller_id = body.fulfiller_id
+    if body.available_on:
+        p.available_on = body.available_on
+    if body.admin_note:
+        p.note = body.admin_note
     p.status = "ready"
     p.denied = 0
     p.assigned_admin_id = admin.id
@@ -554,8 +582,10 @@ def set_preorder_status(po_id: int, body: PreorderStatusIn,
     p = db.get(PreOrder, po_id)
     if not p:
         raise HTTPException(404, "Pre-order not found")
+    # Denying releases the commitment automatically: once the status is no
+    # longer "ready", those units stop being subtracted from availability.
     p.status = body.status
-    if body.status == "cancelled":
+    if body.status in DENIAL_STATUSES:
         p.denied = 1
         if body.reason:
             p.note = body.reason         # shown in app as "Note from Tubura"
@@ -563,7 +593,7 @@ def set_preorder_status(po_id: int, body: PreorderStatusIn,
     p.updated_at = datetime.utcnow()
 
     if p.user:
-        if body.status == "cancelled":
+        if body.status in DENIAL_STATUSES:
             msg = f"Sorry, your pre-order for {p.product_name} could not be fulfilled."
             if body.reason:
                 msg += f" Reason: {body.reason}"
