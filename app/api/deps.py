@@ -55,8 +55,16 @@ def require_superadmin(admin: Administrator = Depends(get_current_admin)) -> Adm
 
 def require_perm(perm: str):
     """Route guard: superadmins pass; regular admins need `perm` in their list."""
+    # Permissions a retailer account always has by virtue of being a retailer,
+    # without needing them listed explicitly (they're scoped by retailer_id).
+    RETAILER_PERMS = ("orders", "preorders_assigned")
+
     def dep(admin: Administrator = Depends(get_current_admin)) -> Administrator:
-        if admin.retailer_id and perm not in ("orders", "preorders_assigned"):
+        if admin.retailer_id:
+            # Retailer accounts are confined to their own scoped endpoints,
+            # but are automatically granted those — no permissions list needed.
+            if perm in RETAILER_PERMS:
+                return admin
             raise HTTPException(403, "Retailer accounts can only access orders "
                                      "and their assigned pre-orders")
         if admin.role == "superadmin":

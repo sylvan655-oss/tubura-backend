@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     DELIVERY_BANDS: str = "5:1000,15:2000,40:3500"   # "km:RWF" bands, ascending
     DELIVERY_FEE_BEYOND: int = 5000           # RWF beyond the last band
 
+    # ── Payments (Flutterwave: MoMo + card via one hosted page) ─────────
+    FLW_SECRET_KEY: str = ""          # empty = online payment switched off
+    FLW_WEBHOOK_HASH: str = ""        # must match the dashboard's secret hash
+    PAYMENT_RETURN_URL: str = "https://sylvan655-oss.github.io/tubura-frontend/"
+
     # ── Africa's Talking SMS (optional — SMS is skipped if missing) ──────
     AT_USERNAME: str = ""
     AT_API_KEY: str = ""
@@ -27,7 +32,7 @@ class Settings(BaseSettings):
     # ── Misc ──────────────────────────────────────────────────────────────
     APP_ENV: str = "development"          # development | production
     CORS_ORIGINS: str = "*"               # comma-separated list, or *
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30   # 30 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 365  # 1 year (keeps occasional users signed in; fewer reset SMS)
 
     class Config:
         env_file = ".env"

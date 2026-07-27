@@ -25,6 +25,7 @@ class PreOrderIn(BaseModel):
     # Commitment funnel fields the app already collects
     needed_by: str | None = None
     reason: str | None = None
+    specifications: str | None = None
     accept_pay: bool = False
     accept_delay: bool = False
     province: str | None = None
@@ -52,6 +53,7 @@ def create_preorder(body: PreOrderIn, user: User = Depends(get_current_user),
                   product_name=name, requested_qty=body.requested_qty,
                   stock_at_request=stock_now, status="under_review",
                   needed_by=body.needed_by, reason=body.reason,
+                  specifications=body.specifications,
                   accept_pay=1 if body.accept_pay else 0,
                   accept_delay=1 if body.accept_delay else 0,
                   req_province=body.province or user.province,
@@ -81,6 +83,7 @@ def my_preorders(user: User = Depends(get_current_user),
              "buyable": bool(p.status == "ready" and p.unit_price
                              and p.reserved_qty and not p.converted_order_id),
              "available_on": p.available_on,
+             "specifications": p.specifications,
              "cancellable": bool(p.status not in ("ordered", "cancelled")
                                  and not p.converted_order_id),
              "converted_order_id": p.converted_order_id,

@@ -51,6 +51,7 @@ class PreOrder(Base):
     # What the customer told us when requesting (captured by the app form)
     needed_by = Column(String(20), nullable=True)      # date string, e.g. "2026-08-15"
     reason = Column(Text, nullable=True)               # "for my 2-hectare maize plot"
+    specifications = Column(Text, nullable=True)       # exact product the customer wants
     accept_pay = Column(Integer, nullable=True)        # 1 = ticked "I will pay once approved"
     accept_delay = Column(Integer, nullable=True)      # 1 = ticked "some products take time"
     req_province = Column(String(80), nullable=True)   # where they want it delivered

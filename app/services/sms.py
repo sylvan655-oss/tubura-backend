@@ -43,9 +43,22 @@ def normalize_phone(phone: str) -> str | None:
     return None
 
 
+# GSM messages over 160 chars are billed as multiple segments. Every
+# automatic SMS is written to fit one segment, but names/reasons vary, so
+# this hard cap guarantees we are never charged for two.
+SMS_MAX = 155
+
+
+def _one_segment(message: str) -> str:
+    if len(message) <= SMS_MAX:
+        return message
+    return message[:SMS_MAX - 1].rstrip() + "\u2026"   # ellipsis
+
+
 def send_sms(phone: str, message: str) -> None:
     """Fire-and-forget: SMS failure must never break signup or orders."""
     to = normalize_phone(phone)
+    message = _one_segment(message)
     if to is None:
         print(f"[sms] invalid phone, not sent: {phone!r}")
         return

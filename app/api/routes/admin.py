@@ -331,7 +331,13 @@ def set_stock(body: StockIn, admin=Depends(require_perm('stock')),
         row = RetailerStock(**body.model_dump())
         db.add(row)
     db.commit()
-    return {"ok": True, "quantity": row.quantity}
+    # Show the admin how this stock is affected by pre-order commitments:
+    # public availability = total shop stock across retailers - committed.
+    shop = shop_totals(db, [body.product_id]).get(body.product_id, 0)
+    committed = committed_totals(db, [body.product_id]).get(body.product_id, 0)
+    available = max(0, shop - committed)
+    return {"ok": True, "quantity": row.quantity,
+            "shop_total": shop, "committed": committed, "available": available}
 
 
 # ── ORDERS ─────────────────────────────────────────────────────────────────
@@ -351,10 +357,8 @@ STATUS_MESSAGES = {
 # in-app notification). Edit this dict to change which texts farmers get.
 SMS_ORDER_STATUSES = ("ready", "delivered")
 SMS_ORDER_TEXT = {
-    "ready": ("Order #{ref} is ready. If you chose delivery it is on its way "
-              "to you; if you chose pickup you can collect it now."),
-    "delivered": ("Order #{ref} has been delivered. Please confirm receipt in "
-                  "the app. Thank you for shopping with Tubura!"),
+    "ready": "Order #{ref} is ready. Delivery is on the way; pickup can be collected now.",
+    "delivered": "Order #{ref} delivered. Please confirm receipt in the app. Thank you!",
 }
 
 
@@ -507,6 +511,7 @@ def admin_preorders(admin=Depends(require_perm('preorders')),
                            if p.fulfiller_id else None),
              "denied": p.denied,
              "needed_by": p.needed_by, "reason": p.reason,
+             "specifications": p.specifications,
              "accept_pay": p.accept_pay, "accept_delay": p.accept_delay,
              "req_province": p.req_province, "req_district": p.req_district,
              "req_sector": p.req_sector,
@@ -585,13 +590,15 @@ def ready_preorder(po_id: int, body: PreorderReadyIn,
     p.updated_at = datetime.utcnow()
     if p.user:
         shop = db.get(Retailer, body.fulfiller_id)
-        msg = (f"Your pre-order for {p.product_name} is APPROVED and ready to buy. "
-               f"{body.reserved_qty} reserved for you at {body.unit_price:,} RWF each"
-               f"{f' at {shop.name}' if shop else ''}. "
-               f"Open the Tubura app > Pre-orders > Buy now to complete it.")
+        inapp = (f"Your pre-order for {p.product_name} is APPROVED and ready to buy. "
+                 f"{body.reserved_qty} reserved for you at {body.unit_price:,} RWF each"
+                 f"{f' at {shop.name}' if shop else ''}. "
+                 f"Open Pre-orders > Buy now to complete it.")
         db.add(Notification(user_id=p.user_id, type="order",
-                            title="Pre-order approved - ready to buy", body=msg))
-        send_sms(p.user.phone, "Tubura: " + msg)
+                            title="Pre-order approved - ready to buy", body=inapp))
+        sms = (f"Tubura: Your pre-order for {p.product_name} is approved & ready "
+               f"to buy at {body.unit_price:,} RWF. Open the app to buy.")
+        send_sms(p.user.phone, sms)
     db.commit()
     return {"ok": True}
 
@@ -625,13 +632,24 @@ def set_preorder_status(po_id: int, body: PreorderStatusIn,
 
     if p.user:
         if body.status in DENIAL_STATUSES:
-            msg = f"Sorry, your pre-order for {p.product_name} could not be fulfilled."
+            inapp = f"Sorry, your pre-order for {p.product_name} could not be fulfilled."
             if body.reason:
-                msg += f" Reason: {body.reason}"
-            msg += " You can place a new pre-order anytime in the app."
+                inapp += f" Reason: {body.reason}"
+            inapp += " You can place a new pre-order anytime in the app."
             db.add(Notification(user_id=p.user_id, type="order",
-                                title="Pre-order denied", body=msg))
-            send_sms(p.user.phone, "Tubura: " + msg)
+                                title="Pre-order denied", body=inapp))
+            sms = f"Tubura: Sorry, your pre-order for {p.product_name} was not fulfilled."
+            if body.reason:
+                # Keep the whole SMS to one segment: trim the reason on a word
+                # boundary so it never gets chopped mid-word by the hard cap.
+                room = 150 - len(sms) - len(" Place a new one anytime.")
+                reason = body.reason.strip()
+                if len(reason) > room > 0:
+                    reason = reason[:room].rsplit(" ", 1)[0] + "\u2026"
+                if room > 0:
+                    sms += f" {reason}"
+            sms += " Place a new one anytime."
+            send_sms(p.user.phone, sms)
         else:
             db.add(Notification(user_id=p.user_id, type="order",
                                 title="Pre-order update",
@@ -708,6 +726,14 @@ class CampaignIn(BaseModel):
 @router.post("/notifications")
 def create_campaign(body: CampaignIn, admin=Depends(require_perm('notifications')),
                     db: Session = Depends(get_db)):
+    # type "push" ALSO sends the message as an SMS to each targeted user, so
+    # an important message is guaranteed to reach them even outside the app.
+    # It requires named recipients — you can't SMS "everyone" this way.
+    push_sms = body.type == "push"
+    if push_sms and body.audience == "all":
+        raise HTTPException(400, "A push (SMS) notification must target "
+                                 "specific customers, not everyone")
+
     if body.audience == "all":
         n = Notification(**body.model_dump(), user_id=None,
                          send_status="sent", sent_at=datetime.utcnow(),
@@ -723,6 +749,12 @@ def create_campaign(body: CampaignIn, admin=Depends(require_perm('notifications'
                                 send_status="sent",
                                 sent_at=datetime.utcnow(),
                                 created_by_admin_id=admin.id))
+            if push_sms:
+                u = db.get(User, uid)
+                if u and u.phone:
+                    # send_sms trims to one segment; keep the title so the
+                    # customer knows what it's about.
+                    send_sms(u.phone, f"Tubura: {body.title}. {body.body}")
     db.commit()
     return {"ok": True}
 
@@ -750,7 +782,7 @@ def delete_notification(notif_id: int, admin=Depends(require_perm('notifications
 
 # ── SUPPORT TICKETS ────────────────────────────────────────────────────────
 
-TICKET_STATUSES = ["open", "in_progress", "resolved", "closed"]
+TICKET_STATUSES = ["open", "in_progress", "resolved"]
 
 
 @router.get("/tickets")
