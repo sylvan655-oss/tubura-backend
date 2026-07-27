@@ -516,6 +516,37 @@ def admin_preorders(admin=Depends(require_perm('preorders')),
              "created_at": p.created_at.isoformat()} for p in rows]
 
 
+@router.get("/preorders/assigned")
+def retailer_assigned_preorders(admin=Depends(require_perm('preorders_assigned')),
+                                db: Session = Depends(get_db)):
+    """
+    READ-ONLY list of pre-orders whose fulfilling shop is the caller's own.
+    Used by retailer accounts to see what HQ has committed to their shop —
+    what to expect stock for and hold for which customer. Retailers cannot
+    approve, price, or deny here; those stay with HQ.
+
+    Superadmins/HQ calling this get an empty list unless they happen to be
+    a retailer account, so it's safe to expose to everyone with the perm.
+    """
+    if not admin.retailer_id:
+        return []          # HQ has the full /preorders view instead
+    rows = (db.query(PreOrder)
+              .filter(PreOrder.fulfiller_id == admin.retailer_id,
+                      PreOrder.status.in_(("ready", "ordered")))
+              .order_by(PreOrder.id.desc()).limit(300).all())
+    return [{"id": p.id,
+             "customer": p.user.name if p.user else None,
+             "phone": p.user.phone if p.user else None,
+             "product_name": p.product_name,
+             "reserved_qty": p.reserved_qty,
+             "unit_price": p.unit_price,
+             "status": p.status,
+             "available_on": p.available_on,
+             "bought": bool(p.converted_order_id),
+             "converted_order_id": p.converted_order_id,
+             "created_at": p.created_at.isoformat()} for p in rows]
+
+
 class PreorderReadyIn(BaseModel):
     unit_price: int
     reserved_qty: int

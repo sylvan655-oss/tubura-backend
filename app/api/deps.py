@@ -56,8 +56,9 @@ def require_superadmin(admin: Administrator = Depends(get_current_admin)) -> Adm
 def require_perm(perm: str):
     """Route guard: superadmins pass; regular admins need `perm` in their list."""
     def dep(admin: Administrator = Depends(get_current_admin)) -> Administrator:
-        if admin.retailer_id and perm != "orders":
-            raise HTTPException(403, "Retailer accounts can only access orders")
+        if admin.retailer_id and perm not in ("orders", "preorders_assigned"):
+            raise HTTPException(403, "Retailer accounts can only access orders "
+                                     "and their assigned pre-orders")
         if admin.role == "superadmin":
             return admin
         if perm not in (admin.permissions or []):
