@@ -18,6 +18,7 @@ from app.models import (Administrator, Category, Product, Retailer,
 from app.api.routes.catalog import (stock_totals, stock_label,
                                     shop_totals, committed_totals)
 from app.services.sms import send_sms
+from app.services.distance import road_km
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -342,7 +343,14 @@ def set_stock(body: StockIn, admin=Depends(require_perm('stock')),
 
 # ── ORDERS ─────────────────────────────────────────────────────────────────
 
-ORDER_STATUSES = ["confirmed", "ready", "delivered", "received", "cancelled"]
+ORDER_STATUSES = ["confirmed", "preparing", "ready",
+                  "delivered", "received", "cancelled"]
+
+# Statuses a retailer may set on their own shop's orders. Forward AND backward
+# among the fulfillment states (so an accidental click is fixable), but never
+# cancel (HQ only) and never "received" (the customer confirms that). They also
+# get "arrived at shop" via a dedicated endpoint (preparing -> ready).
+RETAILER_ORDER_STATUSES = ("confirmed", "ready", "delivered")
 
 STATUS_MESSAGES = {
     "confirmed": "has been confirmed",
@@ -357,7 +365,7 @@ STATUS_MESSAGES = {
 # in-app notification). Edit this dict to change which texts farmers get.
 SMS_ORDER_STATUSES = ("ready", "delivered")
 SMS_ORDER_TEXT = {
-    "ready": "Order #{ref} is ready. Delivery is on the way; pickup can be collected now.",
+    "ready": "Order #{ref} is ready. Pickup can be collected now; delivery will follow shortly.",
     "delivered": "Order #{ref} delivered. Please confirm receipt in the app. Thank you!",
 }
 
@@ -416,9 +424,9 @@ def set_order_status(order_id: int, body: StatusIn,
     if admin.retailer_id:
         if not any(i.retailer_id == admin.retailer_id for i in o.items):
             raise HTTPException(403, "This order is not fulfilled by your shop")
-        if body.status not in ("ready", "delivered", "received"):
-            raise HTTPException(403, "Retailer accounts can only mark orders "
-                                     "Ready, Delivered or Received")
+        if body.status not in RETAILER_ORDER_STATUSES:
+            raise HTTPException(403, "Retailer accounts can move an order "
+                                     "between Confirmed, Ready and Delivered only.")
 
     # Cancelling from the dashboard also restores stock
     if body.status == "cancelled" and o.status != "cancelled":
@@ -539,17 +547,138 @@ def retailer_assigned_preorders(admin=Depends(require_perm('preorders_assigned')
               .filter(PreOrder.fulfiller_id == admin.retailer_id,
                       PreOrder.status.in_(("ready", "ordered")))
               .order_by(PreOrder.id.desc()).limit(300).all())
-    return [{"id": p.id,
-             "customer": p.user.name if p.user else None,
-             "phone": p.user.phone if p.user else None,
-             "product_name": p.product_name,
-             "reserved_qty": p.reserved_qty,
-             "unit_price": p.unit_price,
-             "status": p.status,
-             "available_on": p.available_on,
-             "bought": bool(p.converted_order_id),
-             "converted_order_id": p.converted_order_id,
-             "created_at": p.created_at.isoformat()} for p in rows]
+    out = []
+    for p in rows:
+        order_status = None
+        if p.converted_order_id:
+            o = db.get(Order, p.converted_order_id)
+            order_status = o.status if o else None
+        out.append({
+            "id": p.id,
+            "customer": p.user.name if p.user else None,
+            "phone": p.user.phone if p.user else None,
+            "product_name": p.product_name,
+            "reserved_qty": p.reserved_qty,
+            "unit_price": p.unit_price,
+            "status": p.status,
+            "available_on": p.available_on,
+            "bought": bool(p.converted_order_id),
+            "converted_order_id": p.converted_order_id,
+            "order_status": order_status,
+            "created_at": p.created_at.isoformat()})
+    return out
+
+
+@router.put("/preorders/{po_id}/arrived")
+def preorder_arrived_at_shop(po_id: int,
+                             admin=Depends(require_perm('preorders_assigned')),
+                             db: Session = Depends(get_db)):
+    """Retailer marks a bought pre-order's goods as physically ARRIVED at their
+    shop. This flips the derived order out of the producer-preparation phase
+    ("preparing") into "ready" — from here it behaves as a usual order and
+    appears in the retailer's Delivery tab. Scoped to the caller's own shop."""
+    p = db.get(PreOrder, po_id)
+    if not p:
+        raise HTTPException(404, "Pre-order not found")
+    if admin.retailer_id and p.fulfiller_id != admin.retailer_id:
+        raise HTTPException(403, "This pre-order is not assigned to your shop")
+    if not p.converted_order_id:
+        raise HTTPException(400, "The customer hasn't bought this pre-order yet")
+    o = db.get(Order, p.converted_order_id)
+    if not o:
+        raise HTTPException(404, "Linked order not found")
+    if o.status != "preparing":
+        raise HTTPException(400, f"This order is already '{o.status}', not "
+                                 f"awaiting arrival")
+    o.status = "ready"
+    o.updated_at = datetime.utcnow()
+    o.assigned_admin_id = admin.id
+    # Tell the customer their pre-ordered goods have arrived and are ready.
+    if o.user:
+        db.add(Notification(user_id=o.user_id, type="order",
+                            title="Pre-order ready",
+                            body=f"Your pre-ordered {p.product_name} has arrived "
+                                 f"and is ready (order #{o.ref}).",
+                            order_ref=o.ref))
+        send_sms(o.user.phone, f"Tubura: your pre-ordered {p.product_name} has "
+                               f"arrived and is ready. Order #{o.ref}.")
+    db.commit()
+    return {"ok": True, "order_status": o.status,
+            "order_ref": o.ref, "order_id": o.id}
+
+
+@router.get("/orders/delivery")
+def delivery_queue(admin=Depends(require_perm('orders')),
+                   db: Session = Depends(get_db)):
+    """Retailer's Delivery tab: their shop's orders that are ready to deliver,
+    sorted NEAREST-FIRST so a delivery run can be planned by
+    closeness. Distance is measured shop -> customer using the same engine that
+    powers delivery fees; orders whose location can't be resolved sort last as
+    'distance unknown'. Pickup orders are excluded (nothing to deliver)."""
+    if not admin.retailer_id:
+        return []          # HQ uses the milestone tabs, not this working view
+    retailer = db.get(Retailer, admin.retailer_id)
+    orders = (db.query(Order)
+                .filter(Order.status == "ready")
+                .order_by(Order.id.desc()).limit(300).all())
+
+    rows = []
+    for o in orders:
+        # only this shop's orders, and only ones that need delivering
+        if not any(i.retailer_id == admin.retailer_id for i in o.items):
+            continue
+        if (o.fulfillment or "delivery") == "pickup":
+            continue
+        addr = dict(province=o.province, district=o.district, sector=o.sector,
+                    cell=o.cell, village=o.village, street=o.street,
+                    landmark=o.landmark)
+        d = road_km(db, retailer, addr) if retailer else None
+        km = d[0] if d else None
+        rows.append({
+            "order_id": o.id, "ref": o.ref, "status": o.status,
+            "customer": o.user.name if o.user else None,
+            "phone": o.user.phone if o.user else None,
+            "fulfillment": o.fulfillment,
+            "village": o.village, "cell": o.cell, "sector": o.sector,
+            "district": o.district, "landmark": o.landmark,
+            "km": km,
+            "total": o.total,
+            "created_at": o.created_at.isoformat(),
+        })
+    # nearest first; unknown distances (None) go to the bottom
+    rows.sort(key=lambda r: (r["km"] is None, r["km"] if r["km"] is not None else 0))
+    return rows
+
+
+@router.get("/orders/preparing")
+def preparing_queue(admin=Depends(require_hq),
+                    db: Session = Depends(get_db)):
+    """HQ producer-coordination queue: bought pre-orders still being prepared by
+    the producer (order status 'preparing'), with everything HQ needs to chase
+    the producer off-app and route the goods to the right shop — customer,
+    product, quantity, destination retailer, and how long it's been waiting."""
+    orders = (db.query(Order)
+                .filter(Order.status == "preparing")
+                .order_by(Order.id.asc()).limit(300).all())   # oldest first
+    out = []
+    for o in orders:
+        item = o.items[0] if o.items else None
+        shop = None
+        if item and item.retailer_id:
+            r = db.get(Retailer, item.retailer_id)
+            shop = r.name if r else None
+        out.append({
+            "order_id": o.id, "ref": o.ref,
+            "customer": o.user.name if o.user else None,
+            "phone": o.user.phone if o.user else None,
+            "product_name": item.name if item else None,
+            "qty": item.qty if item else None,
+            "destination_shop": shop,
+            "destination_retailer_id": item.retailer_id if item else None,
+            "total": o.total,
+            "waiting_since": o.created_at.isoformat(),
+        })
+    return out
 
 
 class PreorderReadyIn(BaseModel):

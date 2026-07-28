@@ -225,7 +225,10 @@ def buy_preorder(po_id: int, body: PreorderBuyIn,
                 landmark=(body.landmark or user.landmark))
     subtotal = float(p.unit_price * p.reserved_qty)
 
-    order = Order(ref=new_ref(db, addr), user_id=user.id, status="confirmed",
+    # Pre-order goods aren't in any shop yet — the producer prepares/sources
+    # them. The order sits in "preparing" until the retailer marks it arrived
+    # at their shop, at which point it becomes a usual order.
+    order = Order(ref=new_ref(db, addr), user_id=user.id, status="preparing",
                   fulfillment=fulfillment, subtotal=subtotal,
                   delivery_fee=0, tax=0, total=subtotal, **addr)
     db.add(order); db.flush()
