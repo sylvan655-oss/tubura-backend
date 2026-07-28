@@ -43,6 +43,7 @@ def admin_login(body: AdminLoginIn, db: Session = Depends(get_db)):
             "username": admin.username, "role": admin.role,
             "permissions": admin.permissions,
             "retailer_id": admin.retailer_id,
+            "has_pin": bool(admin.pin_hash),
             "retailer_name": retailer.name if retailer else None}
 
 
@@ -352,6 +353,22 @@ ORDER_STATUSES = ["confirmed", "preparing", "ready",
 # get "arrived at shop" via a dedicated endpoint (preparing -> ready).
 RETAILER_ORDER_STATUSES = ("confirmed", "ready", "delivered")
 
+# Forward-only ordering for retailer transitions. A retailer may only move an
+# order to a status LATER in this sequence than where it is now — never back.
+# HQ is not bound by this (they are the correction path).
+STATUS_RANK = {"preparing": 0, "confirmed": 1, "ready": 2,
+               "delivered": 3, "received": 4}
+
+
+def _verify_retailer_pin(admin, pin: str | None):
+    """If a retailer account has a confirmation PIN set, an action that changes
+    an order's status must carry the correct PIN. Accounts with no PIN set yet
+    proceed without one (graceful rollout). Wrong PIN -> 403, no lockout."""
+    if not admin.retailer_id or not admin.pin_hash:
+        return
+    if not pin or not verify_password(pin, admin.pin_hash):
+        raise HTTPException(403, "Incorrect PIN")
+
 STATUS_MESSAGES = {
     "confirmed": "has been confirmed",
     "preparing": "is being prepared",
@@ -410,6 +427,7 @@ def admin_orders(admin=Depends(require_perm('orders')),
 
 class StatusIn(BaseModel):
     status: str
+    pin: str | None = None
 
 
 @router.put("/orders/{order_id}/status")
@@ -424,9 +442,21 @@ def set_order_status(order_id: int, body: StatusIn,
     if admin.retailer_id:
         if not any(i.retailer_id == admin.retailer_id for i in o.items):
             raise HTTPException(403, "This order is not fulfilled by your shop")
-        if body.status not in RETAILER_ORDER_STATUSES:
+        is_pickup = (o.fulfillment or "delivery") == "pickup"
+        # Delivery orders: retailer tops out at "delivered" (customer confirms
+        # received). Pickup orders: the retailer hands over in person, so they
+        # also confirm "received" themselves.
+        allowed = RETAILER_ORDER_STATUSES + (("received",) if is_pickup else ())
+        if body.status not in allowed:
             raise HTTPException(403, "Retailer accounts can move an order "
-                                     "between Confirmed, Ready and Delivered only.")
+                                     "forward through its fulfilment steps only.")
+        # Forward-only: never let a retailer move an order backwards.
+        cur_rank = STATUS_RANK.get(o.status, -1)
+        new_rank = STATUS_RANK.get(body.status, -1)
+        if new_rank <= cur_rank:
+            raise HTTPException(403, "Orders can only move forward. Ask HQ to "
+                                     "correct a status that was set by mistake.")
+        _verify_retailer_pin(admin, body.pin)
 
     # Cancelling from the dashboard also restores stock
     if body.status == "cancelled" and o.status != "cancelled":
@@ -569,8 +599,12 @@ def retailer_assigned_preorders(admin=Depends(require_perm('preorders_assigned')
     return out
 
 
+class PinIn(BaseModel):
+    pin: str | None = None
+
+
 @router.put("/preorders/{po_id}/arrived")
-def preorder_arrived_at_shop(po_id: int,
+def preorder_arrived_at_shop(po_id: int, body: PinIn = PinIn(),
                              admin=Depends(require_perm('preorders_assigned')),
                              db: Session = Depends(get_db)):
     """Retailer marks a bought pre-order's goods as physically ARRIVED at their
@@ -582,6 +616,7 @@ def preorder_arrived_at_shop(po_id: int,
         raise HTTPException(404, "Pre-order not found")
     if admin.retailer_id and p.fulfiller_id != admin.retailer_id:
         raise HTTPException(403, "This pre-order is not assigned to your shop")
+    _verify_retailer_pin(admin, body.pin)
     if not p.converted_order_id:
         raise HTTPException(400, "The customer hasn't bought this pre-order yet")
     o = db.get(Order, p.converted_order_id)
@@ -958,6 +993,7 @@ def update_ticket(ticket_id: int, body: TicketUpdate,
 class AdminIn(BaseModel):
     username: str
     password: str | None = None
+    pin: str | None = None            # retailer confirmation PIN (issued by HQ)
     email: str | None = None
     role: str = "admin"
     permissions: list[str] = []
@@ -972,6 +1008,7 @@ def list_admins(admin=Depends(require_superadmin),
     return [{"id": a.id, "username": a.username, "email": a.email,
              "role": a.role, "permissions": a.permissions,
              "retailer_id": a.retailer_id,
+             "has_pin": bool(a.pin_hash),
              "is_active": a.is_active} for a in rows]
 
 
@@ -986,6 +1023,7 @@ def add_admin(body: AdminIn, admin=Depends(require_superadmin),
     perms = ["orders"] if body.retailer_id else body.permissions
     a = Administrator(username=body.username,
                       password_hash=hash_password(body.password),
+                      pin_hash=hash_password(body.pin) if body.pin else None,
                       email=body.email, role=role,
                       permissions=perms, is_active=body.is_active,
                       retailer_id=body.retailer_id)
@@ -1008,5 +1046,7 @@ def edit_admin(admin_id: int, body: AdminIn,
     a.is_active = body.is_active
     if body.password:
         a.password_hash = hash_password(body.password)
+    if body.pin:
+        a.pin_hash = hash_password(body.pin)
     db.commit()
     return {"ok": True}

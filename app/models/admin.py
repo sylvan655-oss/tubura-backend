@@ -11,6 +11,10 @@ class Administrator(Base):
     username = Column(String(60), unique=True, index=True, nullable=False)
     email = Column(String(150), nullable=True)
     password_hash = Column(String(255), nullable=False)
+    # Optional short PIN a retailer types to confirm an irreversible order
+    # status change (accidental-click guard). Hashed like a password. NULL =
+    # no PIN set yet (action proceeds without a prompt).
+    pin_hash = Column(String(255), nullable=True)
 
     # superadmin | admin | staff  (superadmin can manage other admins)
     role = Column(String(30), nullable=False, default="admin")
